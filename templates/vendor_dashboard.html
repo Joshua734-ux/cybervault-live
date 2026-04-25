@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Vendor Dashboard</h2>
+<p>Welcome, {{ current_user.business_name or current_user.name }}</p>
+<div class="row">
+    <div class="col-md-6">
+        <div class="card p-3 mb-3">
+            <h4>Your Products</h4>
+            {% for product in products %}
+            <div class="d-flex justify-content-between align-items-center border-bottom py-2">
+                <span>{{ product.name }} - UGX {{ product.price|int }} (Stock: {{ product.stock }})</span>
+                <a href="{{ url_for('vendor_delete_product', product_id=product.id) }}" class="btn btn-sm btn-danger">Delete</a>
+            </div>
+            {% else %}
+            <p>No products yet.</p>
+            {% endfor %}
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card p-3">
+            <h4>Add Product</h4>
+            <form method="POST" action="{{ url_for('vendor_add_product') }}">
+                <input type="text" name="name" class="form-control mb-2" placeholder="Name" required>
+                <input type="number" name="price" class="form-control mb-2" placeholder="Price" required>
+                <input type="number" name="market_price" class="form-control mb-2" placeholder="Market Price" required>
+                <input type="text" name="category" class="form-control mb-2" placeholder="Category">
+                <input type="number" name="stock" class="form-control mb-2" placeholder="Stock" required>
+                <input type="text" name="image_url" class="form-control mb-2" placeholder="Image URL">
+                <textarea name="description" class="form-control mb-2" placeholder="Description"></textarea>
+                <button type="submit" class="btn btn-gold w-100">Add Product</button>
+            </form>
+        </div>
+    </div>
+</div>
+<div class="card p-3 mt-3">
+    <h4>Stats</h4>
+    <p>Total Products: {{ products|length }}</p>
+    <p>Estimated Commission: UGX {{ earnings|int }}</p>
+</div>
+<a href="{{ url_for('vendor_workers') }}" class="btn btn-outline-gold mt-3">Manage Workers</a>
+{% endblock %}

@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Delivery Agent Dashboard</h2>
+<p>Welcome, {{ current_user.name }}</p>
+<div class="card p-3 mb-3">
+    <h4>Performance</h4>
+    <p>Points: {{ points }}/10 &nbsp;&nbsp; Monthly Salary: UGX {{ salary|int }}</p>
+    <p>Available Balance: UGX {{ current_user.balance|int }}</p>
+    <form method="POST" action="{{ url_for('agent_withdraw') }}" class="d-inline">
+        <input type="number" name="amount" placeholder="Amount" required>
+        <button type="submit" class="btn btn-gold">Withdraw</button>
+    </form>
+</div>
+<h4>Your Deliveries</h4>
+{% for delivery in deliveries %}
+<div class="card p-2 mb-2">
+    <div>Order {{ delivery.order_id }} - Status: {{ delivery.status }}</div>
+    <form method="POST" action="{{ url_for('agent_update_delivery', delivery_id=delivery.id) }}">
+        <select name="status" class="form-select d-inline w-50">
+            <option value="assigned">Assigned</option>
+            <option value="picked_up">Picked Up</option>
+            <option value="in_transit">In Transit</option>
+            <option value="delivered">Delivered</option>
+        </select>
+        <button type="submit" class="btn btn-sm btn-gold">Update</button>
+    </form>
+</div>
+{% else %}
+<p>No deliveries assigned.</p>
+{% endfor %}
+{% endblock %}

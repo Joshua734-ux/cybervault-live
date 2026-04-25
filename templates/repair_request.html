@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-6">
+        <div class="card p-4">
+            <h2>Request Repair</h2>
+            <form method="POST">
+                <div class="mb-3"><label>Device</label><input type="text" name="device" class="form-control" required></div>
+                <div class="mb-3"><label>Issue</label><textarea name="issue" class="form-control" rows="3" required></textarea></div>
+                <button type="submit" class="btn btn-gold">Submit</button>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

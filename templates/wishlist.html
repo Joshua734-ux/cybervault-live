@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>My Wishlist</h2>
+<div class="row">
+    {% for product in products %}
+    <div class="col-md-3 mb-3">
+        <div class="card p-2">
+            <img src="{{ product.image_url or 'https://via.placeholder.com/200' }}" class="card-img-top">
+            <h6>{{ product.name }}</h6>
+            <div>UGX {{ product.price|int }}</div>
+            <a href="{{ url_for('add_to_cart', product_id=product.id) }}" class="btn btn-sm btn-gold">Add to Cart</a>
+            <a href="{{ url_for('toggle_wishlist', product_id=product.id) }}" class="btn btn-sm btn-danger">Remove</a>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endblock %}

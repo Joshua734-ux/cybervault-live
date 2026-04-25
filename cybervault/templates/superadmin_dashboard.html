@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>SuperAdmin Dashboard</h2>
+<p><strong>Total Users:</strong> {{ users|length }}</p>
+<p><strong>Total Products:</strong> {{ products|length }}</p>
+<p><strong>Total Orders:</strong> {{ orders|length }}</p>
+<p>Full platform control (add users, set commissions, backup/restore) will be added here.</p>
+{% endblock %}

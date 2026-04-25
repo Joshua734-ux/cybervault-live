@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Checkout</h2>
+<form method="POST">
+    <div class="mb-3"><label>Delivery Address</label><input type="text" name="address" class="form-control" required></div>
+    <div class="card p-3 mb-3">
+        <h4>Order Summary</h4>
+        {% for item in cart_items %}
+            <div>{{ item.product.name }} x{{ item.quantity }} = UGX {{ (item.product.price * item.quantity)|int }}</div>
+        {% endfor %}
+        <hr>
+        <strong>Total: UGX {{ cart_items|sum(attribute='product.price')|int }}</strong>
+    </div>
+    <button type="submit" class="btn btn-gold">Place Order</button>
+</form>
+{% endblock %}

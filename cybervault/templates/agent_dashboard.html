@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Delivery Agent Dashboard</h2>
+<p>Welcome, {{ current_user.name }}</p>
+<h3>Your Deliveries</h3>
+{% if deliveries %}
+    <ul class="list-group">
+    {% for delivery in deliveries %}
+        <li class="list-group-item bg-dark text-white">Order {{ delivery.order_id }} - {{ delivery.status }}</li>
+    {% endfor %}
+    </ul>
+{% else %}
+    <p>No deliveries assigned yet.</p>
+{% endif %}
+{% endblock %}

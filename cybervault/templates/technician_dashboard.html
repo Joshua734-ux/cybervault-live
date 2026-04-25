@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Technician Dashboard</h2>
+<p>Welcome, {{ current_user.name }}</p>
+<h3>Assigned Repairs</h3>
+{% if repairs %}
+    <ul class="list-group">
+    {% for repair in repairs %}
+        <li class="list-group-item bg-dark text-white">{{ repair.device }} - {{ repair.status }}</li>
+    {% endfor %}
+    </ul>
+{% else %}
+    <p>No repairs assigned yet.</p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Disputes</h2>
+{% for d in disputes %}
+<div class="card p-3 mb-2">
+    <div>Order {{ d.order_id }} – Reason: {{ d.reason }}</div>
+    <form method="POST" action="{{ url_for('resolve_dispute', dispute_id=d.id) }}">
+        <input type="text" name="resolution" placeholder="Resolution" class="form-control mb-2">
+        <button type="submit" class="btn btn-sm btn-gold">Resolve</button>
+    </form>
+</div>
+{% else %}
+<p>No disputes.</p>
+{% endfor %}
+{% endblock %}

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Technician Dashboard</h2>
+<p>Welcome, {{ current_user.name }}</p>
+<h4>Assigned Repairs</h4>
+{% for repair in repairs %}
+<div class="card p-2 mb-2">
+    <div>{{ repair.device }} - {{ repair.status }}</div>
+    <form method="POST" action="{{ url_for('technician_update_repair', repair_id=repair.id) }}">
+        <select name="status" class="form-select d-inline w-50">
+            <option value="pending">Pending</option>
+            <option value="diagnosing">Diagnosing</option>
+            <option value="repairing">Repairing</option>
+            <option value="completed">Completed</option>
+        </select>
+        <button type="submit" class="btn btn-sm btn-gold">Update</button>
+    </form>
+</div>
+{% else %}
+<p>No repairs assigned.</p>
+{% endfor %}
+<p><strong>Total earnings: UGX {{ earnings|int }}</strong></p>
+{% endblock %}

@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Manager Dashboard</h2>
+<div class="row">
+    <div class="col-md-3"><div class="card p-3 text-center"><h3>{{ vendors }}</h3><p>Vendors</p></div></div>
+    <div class="col-md-3"><div class="card p-3 text-center"><h3>{{ orders }}</h3><p>Orders</p></div></div>
+    <div class="col-md-3"><div class="card p-3 text-center"><h3>UGX {{ revenue|int }}</h3><p>Revenue</p></div></div>
+    <div class="col-md-3"><div class="card p-3 text-center"><h3>{{ disputes }}</h3><p>Open Disputes</p></div></div>
+</div>
+<a href="{{ url_for('manager_disputes') }}" class="btn btn-gold mt-3">Manage Disputes</a>
+{% endblock %}

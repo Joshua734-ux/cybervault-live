@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Track Order #{{ order.id }}</h2>
+<div class="progress mb-3">
+    <div class="progress-bar bg-gold" style="width: {% if order.status == 'pending' %}25{% elif order.status == 'processing' %}50{% elif order.status == 'shipped' %}75{% elif order.status == 'delivered' %}100{% else %}0{% endif %}%"></div>
+</div>
+<p>Status: {{ order.status }}</p>
+<p>Estimated delivery: {% if order.status == 'shipped' %}2‑3 days{% else %}Pending{% endif %}</p>
+<a href="{{ url_for('customer_orders') }}" class="btn btn-gold">Back</a>
+{% endblock %}

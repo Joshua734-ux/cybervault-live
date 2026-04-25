@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Vendor Dashboard</h2>
+<p>Welcome, {{ current_user.business_name or current_user.name }}</p>
+<h3>Your Products</h3>
+<div class="row">
+    {% for product in products %}
+    <div class="col-md-4 mb-3">
+        <div class="card">
+            <div class="card-body">
+                <h5>{{ product.name }}</h5>
+                <p>Price: UGX {{ product.price|int }}</p>
+                <a href="{{ url_for('delete_product', product_id=product.id) }}" class="btn btn-sm btn-danger">Delete</a>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+<hr>
+<h4>Add New Product</h4>
+<form method="POST" action="{{ url_for('add_product') }}">
+    <div class="row">
+        <div class="col-md-4"><input type="text" name="name" class="form-control" placeholder="Name" required></div>
+        <div class="col-md-2"><input type="number" name="price" class="form-control" placeholder="Price" required></div>
+        <div class="col-md-2"><input type="number" name="market_price" class="form-control" placeholder="Market Price" required></div>
+        <div class="col-md-2"><input type="text" name="category" class="form-control" placeholder="Category"></div>
+        <div class="col-md-2"><input type="number" name="stock" class="form-control" placeholder="Stock" required></div>
+        <div class="col-md-4"><input type="text" name="image_url" class="form-control" placeholder="Image URL"></div>
+        <div class="col-md-8"><textarea name="description" class="form-control" placeholder="Description"></textarea></div>
+        <div class="col-md-12 mt-2"><button type="submit" class="btn btn-gold">Add Product</button></div>
+    </div>
+</form>
+{% endblock %}

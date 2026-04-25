@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Manager Dashboard</h2>
+<p>Platform overview:</p>
+<ul>
+    <li>Total Vendors: {{ vendors|length }}</li>
+    <li>Total Sales: UGX {{ total_sales|int }}</li>
+</ul>
+{% endblock %}

@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Installer Dashboard</h2>
+<p>Welcome, {{ current_user.name }}</p>
+{% for inst in installations %}
+<div class="card p-2 mb-2">
+    Order {{ inst.order_id }} - Status: {{ inst.status }}
+    <form method="POST" action="{{ url_for('installer_update', inst_id=inst.id) }}">
+        <select name="status">
+            <option value="pending">Pending</option>
+            <option value="in_progress">In Progress</option>
+            <option value="completed">Completed</option>
+        </select>
+        <button type="submit">Update</button>
+    </form>
+</div>
+{% else %}
+<p>No installations assigned.</p>
+{% endfor %}
+{% endblock %}
