@@ -9,11 +9,27 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 
-# ----------------------------- Force template creation -----------------------------
-def ensure_templates():
-    os.makedirs('templates', exist_ok=True)
-    templates = {
-        'base.html': '''<!DOCTYPE html>
+# ----------------------------- Create app first -----------------------------
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'your-secret-key-change-in-production'
+app.config['UPLOAD_FOLDER'] = 'static/uploads'
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
+if os.environ.get('RENDER'):
+    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:////tmp/cybervault.db'
+else:
+    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///cybervault.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db = SQLAlchemy(app)
+login_manager = LoginManager(app)
+login_manager.login_view = 'customer_login'
+
+# ----------------------------- Ensure templates directory exists -----------------------------
+os.makedirs('templates', exist_ok=True)
+templates = {
+    'base.html': '''<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -61,7 +77,7 @@ def ensure_templates():
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>''',
-        'index.html': '''{% extends "base.html" %}
+    'index.html': '''{% extends "base.html" %}
 {% block content %}
 <div class="row mb-4">
     <div class="col-md-4">
@@ -116,7 +132,7 @@ function filterProducts() {
 }
 </script>
 {% endblock %}''',
-        'register.html': '''{% extends "base.html" %}
+    'register.html': '''{% extends "base.html" %}
 {% block content %}
 <div class="row justify-content-center">
     <div class="col-md-6">
@@ -134,7 +150,7 @@ function filterProducts() {
     </div>
 </div>
 {% endblock %}''',
-        'customer_login.html': '''{% extends "base.html" %}
+    'customer_login.html': '''{% extends "base.html" %}
 {% block content %}
 <div class="row justify-content-center">
     <div class="col-md-6">
@@ -150,7 +166,7 @@ function filterProducts() {
     </div>
 </div>
 {% endblock %}''',
-        'customer_dashboard.html': '''{% extends "base.html" %}
+    'customer_dashboard.html': '''{% extends "base.html" %}
 {% block content %}
 <h2 class="mb-4">🛍️ My Dashboard</h2>
 <div class="row">
@@ -223,7 +239,7 @@ function filterProducts() {
     {% endfor %}
 </div>
 {% endblock %}''',
-        'customer_orders.html': '''{% extends "base.html" %}
+    'customer_orders.html': '''{% extends "base.html" %}
 {% block content %}
 <h2>My Orders</h2>
 {% for order in orders %}
@@ -236,7 +252,7 @@ function filterProducts() {
 <p>No orders yet.</p>
 {% endfor %}
 {% endblock %}''',
-        'checkout.html': '''{% extends "base.html" %}
+    'checkout.html': '''{% extends "base.html" %}
 {% block content %}
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -271,7 +287,7 @@ function filterProducts() {
     });
 </script>
 {% endblock %}''',
-        'order_detail.html': '''{% extends "base.html" %}
+    'order_detail.html': '''{% extends "base.html" %}
 {% block content %}
 <h2>Order #{{ order.id }}</h2>
 <p>Status: {{ order.status }}</p>
@@ -310,7 +326,7 @@ function filterProducts() {
     setInterval(updateAgentLocation, 5000);
 </script>
 {% endblock %}''',
-        'order_chat.html': '''{% extends "base.html" %}
+    'order_chat.html': '''{% extends "base.html" %}
 {% block content %}
 <h2>Chat with Delivery Agent</h2>
 <div id="chatMessages" style="height: 400px; overflow-y: auto; background: #1a1a2e; border-radius: 10px; padding: 10px;"></div>
@@ -348,7 +364,7 @@ function filterProducts() {
     setInterval(loadMessages, 2000);
 </script>
 {% endblock %}''',
-        'management_login.html': '''{% extends "base.html" %}
+    'management_login.html': '''{% extends "base.html" %}
 {% block content %}
 <div class="row justify-content-center">
     <div class="col-md-6">
@@ -363,7 +379,7 @@ function filterProducts() {
     </div>
 </div>
 {% endblock %}''',
-        'vendor_dashboard.html': '''{% extends "base.html" %}
+    'vendor_dashboard.html': '''{% extends "base.html" %}
 {% block content %}
 <h2>Vendor Dashboard</h2>
 <p>Welcome, {{ current_user.business_name or current_user.name }}</p>
@@ -409,7 +425,7 @@ function filterProducts() {
 </div>
 <a href="{{ url_for('vendor_workers') }}" class="btn btn-outline-gold mt-3">Manage Workers</a>
 {% endblock %}''',
-        'vendor_workers.html': '''{% extends "base.html" %}
+    'vendor_workers.html': '''{% extends "base.html" %}
 {% block content %}
 <h2>Manage Workers</h2>
 <table class="table table-dark">
@@ -421,7 +437,7 @@ function filterProducts() {
     </tbody>
 </table>
 {% endblock %}''',
-        'technician_dashboard.html': '''{% extends "base.html" %}
+    'technician_dashboard.html': '''{% extends "base.html" %}
 {% block content %}
 <h2>Technician Dashboard</h2>
 <p>Welcome, {{ current_user.name }}</p>
@@ -444,7 +460,7 @@ function filterProducts() {
 {% endfor %}
 <p><strong>Total earnings: UGX {{ earnings|int }}</strong></p>
 {% endblock %}''',
-        'agent_dashboard.html': '''{% extends "base.html" %}
+    'agent_dashboard.html': '''{% extends "base.html" %}
 {% block content %}
 <h2>Delivery Agent Dashboard</h2>
 <p>Welcome, {{ current_user.name }}</p>
@@ -475,12 +491,12 @@ function filterProducts() {
 <p>No deliveries assigned.</p>
 {% endfor %}
 {% endblock %}''',
-        'installer_dashboard.html': '''{% extends "base.html" %}
+    'installer_dashboard.html': '''{% extends "base.html" %}
 {% block content %}
 <h2>Installer Dashboard</h2>
 <p>Installation requests will appear here.</p>
 {% endblock %}''',
-        'manager_dashboard.html': '''{% extends "base.html" %}
+    'manager_dashboard.html': '''{% extends "base.html" %}
 {% block content %}
 <h2>Manager Dashboard</h2>
 <div class="row">
@@ -506,7 +522,7 @@ function filterProducts() {
     </div>
 </div>
 {% endblock %}''',
-        'superadmin_dashboard.html': '''{% extends "base.html" %}
+    'superadmin_dashboard.html': '''{% extends "base.html" %}
 {% block content %}
 <h2>SuperAdmin Dashboard</h2>
 <div class="row">
@@ -546,31 +562,12 @@ function filterProducts() {
     </tbody>
 </table>
 {% endblock %}'''
-    }
-    for name, content in templates.items():
-        path = os.path.join('templates', name)
-        if not os.path.exists(path):
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write(content)
-
-# Ensure templates are written before app starts
-ensure_templates()
-
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key-change-in-production'
-app.config['UPLOAD_FOLDER'] = 'static/uploads'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-
-if os.environ.get('RENDER'):
-    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:////tmp/cybervault.db'
-else:
-    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///cybervault.db'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
-db = SQLAlchemy(app)
-login_manager = LoginManager(app)
-login_manager.login_view = 'customer_login'
+}
+for filename, content in templates.items():
+    path = os.path.join('templates', filename)
+    if not os.path.exists(path):
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(content)
 
 # ----------------------------- MODELS -----------------------------
 class User(UserMixin, db.Model):
@@ -752,7 +749,7 @@ def assign_agent_for_order(order_id, customer_lat, customer_lng):
         return da
     return None
 
-# ----------------------------- CUSTOMER ROUTES -----------------------------
+# ----------------------------- ROUTES -----------------------------
 @app.route('/')
 def index():
     products = Product.query.all()
@@ -1299,7 +1296,6 @@ def uploaded_file(filename):
 
 # ----------------------------- RUN -----------------------------
 if __name__ == '__main__':
-    import os
     with app.app_context():
         db.create_all()
         if not User.query.filter_by(role='superadmin').first():
