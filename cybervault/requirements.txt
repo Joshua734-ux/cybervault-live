@@ -1,3 +1,4 @@
 flask
 flask-sqlalchemy
 flask-login
+gunicorn     # 👈 This is the line you need to add
