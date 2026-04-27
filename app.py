@@ -1,17 +1,21 @@
 import os
 import json
 import io
+import math
+import random
 from datetime import datetime
-from flask import Flask, render_template, redirect, url_for, flash, request, session, send_file
+from werkzeug.utils import secure_filename
+from flask import Flask, render_template, redirect, url_for, flash, request, session, send_file, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 
-# ------------------------------------------------------------
-# Flask app setup
-# ------------------------------------------------------------
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-change-in-production'
+app.config['UPLOAD_FOLDER'] = 'static/uploads'
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
 if os.environ.get('RENDER'):
     app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:////tmp/cybervault.db'
 else:
@@ -22,9 +26,7 @@ db = SQLAlchemy(app)
 login_manager = LoginManager(app)
 login_manager.login_view = 'customer_login'
 
-# ------------------------------------------------------------
-# Database Models (all features)
-# ------------------------------------------------------------
+# ----------------------------- MODELS (all features) -----------------------------
 class User(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
     email = db.Column(db.String(100), unique=True, nullable=False)
@@ -37,10 +39,8 @@ class User(UserMixin, db.Model):
     specialty = db.Column(db.String(50))
     status = db.Column(db.String(20), default='active')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
-
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
 
@@ -58,7 +58,7 @@ class Product(db.Model):
     market_price = db.Column(db.Float, nullable=False)
     category = db.Column(db.String(50))
     stock = db.Column(db.Integer, default=0)
-    image_url = db.Column(db.String(200))
+    image_filename = db.Column(db.String(200))  # stores uploaded file name
     description = db.Column(db.Text)
     vendor_id = db.Column(db.Integer, db.ForeignKey('user.id'))
     ratings = db.Column(db.String(200), default='[]')
@@ -81,11 +81,15 @@ class Order(db.Model):
     id = db.Column(db.String(20), primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
     total = db.Column(db.Float, nullable=False)
+    deposit_paid = db.Column(db.Float, default=0.0)
+    balance = db.Column(db.Float, default=0.0)
     status = db.Column(db.String(20), default='pending')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     items = db.Column(db.Text)
     delivery_address = db.Column(db.String(200))
-    return_reason = db.Column(db.Text)
+    customer_lat = db.Column(db.Float)
+    customer_lng = db.Column(db.Float)
+    transport_fee = db.Column(db.Float, default=0.0)
 
 class Repair(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -97,26 +101,30 @@ class Repair(db.Model):
     quote = db.Column(db.Float)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-class Delivery(db.Model):
+class DeliveryAssignment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    order_id = db.Column(db.String(20))
+    order_id = db.Column(db.String(20), db.ForeignKey('order.id'))
     agent_id = db.Column(db.Integer, db.ForeignKey('user.id'))
     status = db.Column(db.String(20), default='assigned')
-    proof_photo = db.Column(db.String(200))
-    completed_at = db.Column(db.DateTime)
+    distance_km = db.Column(db.Float, default=0.0)
+    transport_fee = db.Column(db.Float, default=0.0)
+    assigned_at = db.Column(db.DateTime, default=datetime.utcnow)
+    customer_confirmed_arrival = db.Column(db.Boolean, default=False)
+    remaining_payment_confirmed = db.Column(db.Boolean, default=False)
 
-class Installation(db.Model):
+class AgentLocation(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    order_id = db.Column(db.String(20))
-    installer_id = db.Column(db.Integer, db.ForeignKey('user.id'))
-    status = db.Column(db.String(20), default='pending')
-    scheduled_date = db.Column(db.DateTime)
+    agent_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    lat = db.Column(db.Float, default=0.3136)
+    lng = db.Column(db.Float, default=32.5811)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-class Referral(db.Model):
+class ChatMessage(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    referrer_id = db.Column(db.Integer, db.ForeignKey('user.id'))
-    referred_email = db.Column(db.String(100))
-    reward_claimed = db.Column(db.Boolean, default=False)
+    delivery_id = db.Column(db.Integer, db.ForeignKey('delivery_assignment.id'))
+    sender_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    message = db.Column(db.Text)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
 
 class Review(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -146,9 +154,7 @@ class AuditLog(db.Model):
 def load_user(user_id):
     return db.session.get(User, int(user_id))
 
-# ------------------------------------------------------------
-# Helper functions
-# ------------------------------------------------------------
+# ----------------------------- HELPER FUNCTIONS -----------------------------
 def get_settings():
     s = PlatformSettings.query.first()
     if not s:
@@ -157,24 +163,597 @@ def get_settings():
         db.session.commit()
     return s
 
-def add_audit(action, details):
-    if current_user.is_authenticated:
-        log = AuditLog(user_id=current_user.id, action=action, details=details)
-        db.session.add(log)
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
+    c = 2 * math.asin(math.sqrt(a))
+    return R * c
+
+def assign_agent_for_order(order_id, customer_lat, customer_lng):
+    agents = User.query.filter_by(role='agent', status='active').all()
+    if not agents:
+        return None
+    best_agent = None
+    best_dist = float('inf')
+    for agent in agents:
+        loc = AgentLocation.query.filter_by(agent_id=agent.id).first()
+        if not loc:
+            loc = AgentLocation(agent_id=agent.id, lat=0.3136, lng=32.5811)
+            db.session.add(loc)
+            db.session.commit()
+        dist = haversine(loc.lat, loc.lng, customer_lat, customer_lng)
+        if dist < best_dist:
+            best_dist = dist
+            best_agent = agent
+    if best_agent:
+        settings = get_settings()
+        free_km = settings.free_delivery_km
+        rate = settings.delivery_rate_per_km
+        distance_km = max(0, best_dist - free_km)
+        fee = distance_km * rate
+        da = DeliveryAssignment(
+            order_id=order_id,
+            agent_id=best_agent.id,
+            distance_km=distance_km,
+            transport_fee=fee
+        )
+        db.session.add(da)
         db.session.commit()
+        return da
+    return None
 
-def calculate_agent_points(agent_id):
-    completed = Delivery.query.filter_by(agent_id=agent_id, status='delivered').count()
-    return min(completed, 10)
+# ----------------------------- CUSTOMER ROUTES -----------------------------
+@app.route('/')
+def index():
+    products = Product.query.all()
+    return render_template('index.html', products=products)
 
-def calculate_agent_salary(agent_id):
-    points = calculate_agent_points(agent_id)
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        name = request.form['name']
+        email = request.form['email']
+        phone = request.form['phone']
+        password = request.form['password']
+        if User.query.filter_by(email=email).first():
+            flash('Email already registered', 'danger')
+            return redirect(url_for('register'))
+        user = User(name=name, email=email, phone=phone, role='buyer')
+        user.set_password(password)
+        db.session.add(user)
+        db.session.commit()
+        flash('Account created! Please login.', 'success')
+        return redirect(url_for('customer_login'))
+    return render_template('register.html')
+
+@app.route('/customer/login', methods=['GET', 'POST'])
+def customer_login():
+    if request.method == 'POST':
+        email = request.form['email']
+        password = request.form['password']
+        user = User.query.filter_by(email=email).first()
+        if user and user.check_password(password) and user.role == 'buyer' and user.status == 'active':
+            login_user(user)
+            return redirect(url_for('customer_dashboard'))
+        flash('Invalid credentials', 'danger')
+    return render_template('customer_login.html')
+
+@app.route('/customer/dashboard')
+@login_required
+def customer_dashboard():
+    if current_user.role != 'buyer':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    products = Product.query.all()
+    cart_items = CartItem.query.filter_by(user_id=current_user.id).all()
+    orders = Order.query.filter_by(user_id=current_user.id).order_by(Order.created_at.desc()).all()
+    return render_template('customer_dashboard.html', products=products, cart_items=cart_items, orders=orders)
+
+@app.route('/add-to-cart/<int:product_id>')
+@login_required
+def add_to_cart(product_id):
+    if current_user.role != 'buyer':
+        flash('Only customers can add to cart', 'danger')
+        return redirect(url_for('index'))
+    item = CartItem.query.filter_by(user_id=current_user.id, product_id=product_id).first()
+    if item:
+        item.quantity += 1
+    else:
+        item = CartItem(user_id=current_user.id, product_id=product_id, quantity=1)
+        db.session.add(item)
+    db.session.commit()
+    flash('Added to cart', 'success')
+    return redirect(url_for('customer_dashboard'))
+
+@app.route('/remove-from-cart/<int:item_id>')
+@login_required
+def remove_from_cart(item_id):
+    item = db.session.get(CartItem, item_id)
+    if item and item.user_id == current_user.id:
+        db.session.delete(item)
+        db.session.commit()
+        flash('Removed', 'success')
+    return redirect(url_for('customer_dashboard'))
+
+@app.route('/update-cart/<int:item_id>', methods=['POST'])
+@login_required
+def update_cart(item_id):
+    item = db.session.get(CartItem, item_id)
+    if item and item.user_id == current_user.id:
+        new_qty = int(request.form['quantity'])
+        if new_qty <= 0:
+            db.session.delete(item)
+        else:
+            item.quantity = new_qty
+        db.session.commit()
+    return redirect(url_for('customer_dashboard'))
+
+@app.route('/checkout', methods=['GET', 'POST'])
+@login_required
+def checkout():
+    if current_user.role != 'buyer':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    cart_items = CartItem.query.filter_by(user_id=current_user.id).all()
+    if not cart_items:
+        flash('Cart empty', 'danger')
+        return redirect(url_for('customer_dashboard'))
+    if request.method == 'POST':
+        address = request.form['address']
+        lat = float(request.form['lat'])
+        lng = float(request.form['lng'])
+        warehouse_lat = 0.3136
+        warehouse_lng = 32.5811
+        dist = haversine(warehouse_lat, warehouse_lng, lat, lng)
+        settings = get_settings()
+        free_km = settings.free_delivery_km
+        chargeable = max(0, dist - free_km)
+        transport_fee = chargeable * settings.delivery_rate_per_km
+        product_total = sum(item.product.price * item.quantity for item in cart_items)
+        deposit = product_total * 0.5
+        balance = product_total - deposit
+        total = product_total + transport_fee
+        order_id = 'ORD' + str(int(datetime.utcnow().timestamp()))
+        order = Order(
+            id=order_id, user_id=current_user.id, total=total,
+            deposit_paid=0, balance=balance,
+            status='pending_deposit', delivery_address=address,
+            customer_lat=lat, customer_lng=lng, transport_fee=transport_fee,
+            items=json.dumps([{'id': item.product.id, 'name': item.product.name, 'price': item.product.price, 'quantity': item.quantity} for item in cart_items])
+        )
+        db.session.add(order)
+        for item in cart_items:
+            product = item.product
+            product.stock -= item.quantity
+            db.session.delete(item)
+        db.session.commit()
+        order.deposit_paid = deposit
+        order.status = 'deposit_paid'
+        db.session.commit()
+        da = assign_agent_for_order(order_id, lat, lng)
+        if da:
+            flash(f'Order placed! Deposit of UGX {deposit:.0f} paid. Balance UGX {balance:.0f} due on delivery. Agent assigned.', 'success')
+        else:
+            flash(f'Order placed! Deposit paid. No agent available yet – will assign soon.', 'warning')
+        return redirect(url_for('customer_orders'))
+    return render_template('checkout.html', cart_items=cart_items)
+
+@app.route('/customer/orders')
+@login_required
+def customer_orders():
+    if current_user.role != 'buyer':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    orders = Order.query.filter_by(user_id=current_user.id).order_by(Order.created_at.desc()).all()
+    return render_template('customer_orders.html', orders=orders)
+
+@app.route('/order/<order_id>')
+@login_required
+def view_order(order_id):
+    order = Order.query.get_or_404(order_id)
+    if order.user_id != current_user.id and current_user.role not in ['manager','superadmin']:
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    delivery = DeliveryAssignment.query.filter_by(order_id=order_id).first()
+    agent = None
+    if delivery:
+        agent = User.query.get(delivery.agent_id)
+    return render_template('order_detail.html', order=order, delivery=delivery, agent=agent)
+
+@app.route('/order/<order_id>/chat')
+@login_required
+def order_chat(order_id):
+    order = Order.query.get_or_404(order_id)
+    if order.user_id != current_user.id:
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    delivery = DeliveryAssignment.query.filter_by(order_id=order_id).first()
+    if not delivery:
+        flash('No delivery assigned yet', 'warning')
+        return redirect(url_for('view_order', order_id=order_id))
+    return render_template('order_chat.html', order=order, delivery=delivery)
+
+@app.route('/api/chat/<int:delivery_id>', methods=['GET', 'POST'])
+@login_required
+def chat_api(delivery_id):
+    delivery = DeliveryAssignment.query.get_or_404(delivery_id)
+    order = Order.query.get(delivery.order_id)
+    if not (current_user.id == order.user_id or current_user.id == delivery.agent_id):
+        return jsonify({'error': 'Unauthorized'}), 403
+    if request.method == 'POST':
+        msg = request.json.get('message')
+        if msg:
+            chat = ChatMessage(delivery_id=delivery_id, sender_id=current_user.id, message=msg)
+            db.session.add(chat)
+            db.session.commit()
+        return jsonify({'status': 'ok'})
+    else:
+        messages = ChatMessage.query.filter_by(delivery_id=delivery_id).order_by(ChatMessage.timestamp).all()
+        return jsonify([{'sender': m.sender_id, 'message': m.message, 'timestamp': m.timestamp.isoformat()} for m in messages])
+
+@app.route('/api/agent/location/<int:agent_id>')
+@login_required
+def agent_location(agent_id):
+    if current_user.role == 'buyer':
+        has_order = DeliveryAssignment.query.join(Order).filter(
+            DeliveryAssignment.agent_id == agent_id,
+            Order.user_id == current_user.id
+        ).first()
+        if not has_order:
+            return jsonify({'error': 'Unauthorized'}), 403
+    loc = AgentLocation.query.filter_by(agent_id=agent_id).first()
+    if not loc:
+        loc = AgentLocation(agent_id=agent_id, lat=0.3136, lng=32.5811)
+        db.session.add(loc)
+        db.session.commit()
+    return jsonify({'lat': loc.lat, 'lng': loc.lng, 'updated_at': loc.updated_at.isoformat()})
+
+@app.route('/api/agent/update-location', methods=['POST'])
+@login_required
+def update_agent_location():
+    if current_user.role != 'agent':
+        return jsonify({'error': 'Only agents can update location'}), 403
+    data = request.json
+    lat = data.get('lat')
+    lng = data.get('lng')
+    if lat is None or lng is None:
+        return jsonify({'error': 'Missing coordinates'}), 400
+    loc = AgentLocation.query.filter_by(agent_id=current_user.id).first()
+    if not loc:
+        loc = AgentLocation(agent_id=current_user.id)
+        db.session.add(loc)
+    loc.lat = lat
+    loc.lng = lng
+    loc.updated_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify({'status': 'ok'})
+
+@app.route('/order/<order_id>/confirm-arrival', methods=['POST'])
+@login_required
+def confirm_arrival(order_id):
+    order = Order.query.get_or_404(order_id)
+    if order.user_id != current_user.id:
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    delivery = DeliveryAssignment.query.filter_by(order_id=order_id).first()
+    if not delivery:
+        flash('No delivery assignment', 'danger')
+        return redirect(url_for('view_order', order_id=order_id))
+    if delivery.customer_confirmed_arrival:
+        flash('Already confirmed', 'info')
+        return redirect(url_for('view_order', order_id=order_id))
+    order.balance = 0
+    order.status = 'delivered'
+    delivery.customer_confirmed_arrival = True
+    delivery.remaining_payment_confirmed = True
+    delivery.status = 'delivered'
+    db.session.commit()
+    flash('Order delivered! Thank you.', 'success')
+    return redirect(url_for('customer_orders'))
+
+# ----------------------------- VENDOR DASHBOARD (with file upload) -----------------------------
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in {'png', 'jpg', 'jpeg', 'gif'}
+
+@app.route('/vendor/dashboard')
+@login_required
+def vendor_dashboard():
+    if current_user.role != 'vendor':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    products = Product.query.filter_by(vendor_id=current_user.id).all()
+    earnings = sum([p.price for p in products]) * get_settings().vendor_commission
+    return render_template('vendor_dashboard.html', products=products, earnings=earnings)
+
+@app.route('/vendor/add-product', methods=['POST'])
+@login_required
+def vendor_add_product():
+    if current_user.role != 'vendor':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    name = request.form['name']
+    price = float(request.form['price'])
+    market_price = float(request.form['market_price'])
+    category = request.form['category']
+    stock = int(request.form['stock'])
+    description = request.form['description']
+    # handle file upload
+    file = request.files.get('image')
+    filename = None
+    if file and allowed_file(file.filename):
+        filename = secure_filename(file.filename)
+        # add timestamp to avoid collisions
+        name_parts = filename.rsplit('.', 1)
+        filename = f"{datetime.utcnow().timestamp()}_{name_parts[0]}.{name_parts[1]}"
+        file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+    product = Product(
+        name=name, price=price, market_price=market_price, category=category,
+        stock=stock, image_filename=filename, description=description, vendor_id=current_user.id
+    )
+    db.session.add(product)
+    db.session.commit()
+    flash('Product added', 'success')
+    return redirect(url_for('vendor_dashboard'))
+
+@app.route('/vendor/delete-product/<int:product_id>')
+@login_required
+def vendor_delete_product(product_id):
+    if current_user.role != 'vendor':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    product = db.session.get(Product, product_id)
+    if product and product.vendor_id == current_user.id:
+        # delete image file if exists
+        if product.image_filename:
+            try:
+                os.remove(os.path.join(app.config['UPLOAD_FOLDER'], product.image_filename))
+            except:
+                pass
+        db.session.delete(product)
+        db.session.commit()
+        flash('Product deleted', 'success')
+    return redirect(url_for('vendor_dashboard'))
+
+@app.route('/vendor/workers')
+@login_required
+def vendor_workers():
+    if current_user.role != 'vendor':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    workers = User.query.filter(User.role.in_(['technician', 'agent', 'installer'])).all()
+    return render_template('vendor_workers.html', workers=workers)
+
+# ----------------------------- TECHNICIAN DASHBOARD -----------------------------
+@app.route('/technician/dashboard')
+@login_required
+def technician_dashboard():
+    if current_user.role != 'technician':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    repairs = Repair.query.filter_by(assigned_technician_id=current_user.id).all()
+    earnings = sum([r.quote or 0 for r in repairs if r.status == 'completed'])
+    return render_template('technician_dashboard.html', repairs=repairs, earnings=earnings)
+
+@app.route('/technician/update-repair/<int:repair_id>', methods=['POST'])
+@login_required
+def technician_update_repair(repair_id):
+    if current_user.role != 'technician':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    repair = db.session.get(Repair, repair_id)
+    if repair and repair.assigned_technician_id == current_user.id:
+        repair.status = request.form['status']
+        db.session.commit()
+        flash('Repair updated', 'success')
+    return redirect(url_for('technician_dashboard'))
+
+# ----------------------------- AGENT DASHBOARD -----------------------------
+@app.route('/agent/dashboard')
+@login_required
+def agent_dashboard():
+    if current_user.role != 'agent':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    deliveries = DeliveryAssignment.query.filter_by(agent_id=current_user.id).all()
+    points = min(len([d for d in deliveries if d.status == 'delivered']), 10)
     settings = get_settings()
-    return int((points / 10) * settings.agent_base_salary)
+    salary = int((points / 10) * settings.agent_base_salary)
+    return render_template('agent_dashboard.html', deliveries=deliveries, points=points, salary=salary)
 
-# ------------------------------------------------------------
-# Ensure templates directory and files exist
-# ------------------------------------------------------------
+@app.route('/agent/update-delivery/<int:delivery_id>', methods=['POST'])
+@login_required
+def agent_update_delivery(delivery_id):
+    if current_user.role != 'agent':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    delivery = db.session.get(DeliveryAssignment, delivery_id)
+    if delivery and delivery.agent_id == current_user.id:
+        new_status = request.form['status']
+        delivery.status = new_status
+        if new_status == 'delivered':
+            delivery.completed_at = datetime.utcnow()
+        db.session.commit()
+        flash('Delivery updated', 'success')
+    return redirect(url_for('agent_dashboard'))
+
+@app.route('/agent/withdraw', methods=['POST'])
+@login_required
+def agent_withdraw():
+    if current_user.role != 'agent':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    amount = float(request.form['amount'])
+    if amount > current_user.balance:
+        flash('Insufficient balance', 'danger')
+        return redirect(url_for('agent_dashboard'))
+    current_user.balance -= amount
+    db.session.commit()
+    flash('Withdrawal request submitted', 'success')
+    return redirect(url_for('agent_dashboard'))
+
+# ----------------------------- INSTALLER DASHBOARD -----------------------------
+@app.route('/installer/dashboard')
+@login_required
+def installer_dashboard():
+    if current_user.role != 'installer':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    # installations = Installation.query.filter_by(installer_id=current_user.id).all()
+    return render_template('installer_dashboard.html')
+
+# ----------------------------- MANAGER DASHBOARD -----------------------------
+@app.route('/manager/dashboard')
+@login_required
+def manager_dashboard():
+    if current_user.role != 'manager':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    deliveries = DeliveryAssignment.query.all()
+    agents = User.query.filter_by(role='agent').all()
+    return render_template('manager_dashboard.html', deliveries=deliveries, agents=agents)
+
+@app.route('/manager/reassign-delivery/<int:delivery_id>', methods=['POST'])
+@login_required
+def reassign_delivery(delivery_id):
+    if current_user.role != 'manager':
+        return jsonify({'error': 'Unauthorized'}), 403
+    new_agent_id = request.form['agent_id']
+    delivery = DeliveryAssignment.query.get(delivery_id)
+    if not delivery:
+        flash('Delivery not found', 'danger')
+        return redirect(url_for('manager_dashboard'))
+    old_agent_id = delivery.agent_id
+    delivery.agent_id = new_agent_id
+    db.session.commit()
+    flash(f'Reassigned from agent {old_agent_id} to {new_agent_id}', 'success')
+    return redirect(url_for('manager_dashboard'))
+
+# ----------------------------- SUPERADMIN DASHBOARD -----------------------------
+@app.route('/superadmin/dashboard')
+@login_required
+def superadmin_dashboard():
+    if current_user.role != 'superadmin':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    users = User.query.all()
+    products = Product.query.all()
+    orders = Order.query.all()
+    settings = get_settings()
+    return render_template('superadmin_dashboard.html', users=users, products=products, orders=orders, settings=settings)
+
+@app.route('/superadmin/create-user', methods=['POST'])
+@login_required
+def superadmin_create_user():
+    if current_user.role != 'superadmin':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    name = request.form['name']
+    email = request.form['email']
+    phone = request.form['phone']
+    role = request.form['role']
+    password = request.form['password']
+    if User.query.filter_by(email=email).first():
+        flash('Email already exists', 'danger')
+        return redirect(url_for('superadmin_dashboard'))
+    user = User(name=name, email=email, phone=phone, role=role)
+    user.set_password(password)
+    db.session.add(user)
+    db.session.commit()
+    flash('User created', 'success')
+    return redirect(url_for('superadmin_dashboard'))
+
+@app.route('/superadmin/delete-user/<int:user_id>')
+@login_required
+def superadmin_delete_user(user_id):
+    if current_user.role != 'superadmin':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    user = db.session.get(User, user_id)
+    if user and user.id != current_user.id:
+        db.session.delete(user)
+        db.session.commit()
+        flash('User deleted', 'success')
+    return redirect(url_for('superadmin_dashboard'))
+
+@app.route('/superadmin/settings', methods=['POST'])
+@login_required
+def superadmin_settings():
+    if current_user.role != 'superadmin':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    settings = get_settings()
+    settings.vendor_commission = float(request.form['vendor_commission']) / 100
+    settings.agent_base_salary = float(request.form['agent_base_salary'])
+    db.session.commit()
+    flash('Settings updated', 'success')
+    return redirect(url_for('superadmin_dashboard'))
+
+@app.route('/superadmin/backup')
+@login_required
+def superadmin_backup():
+    if current_user.role != 'superadmin':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    data = {
+        'users': [{'id': u.id, 'email': u.email, 'name': u.name, 'role': u.role} for u in User.query.all()],
+        'products': [{'id': p.id, 'name': p.name, 'price': p.price} for p in Product.query.all()],
+        'orders': [{'id': o.id, 'total': o.total, 'status': o.status} for o in Order.query.all()]
+    }
+    json_str = json.dumps(data, indent=2)
+    return send_file(io.BytesIO(json_str.encode()), as_attachment=True, download_name='cybervault_backup.json', mimetype='application/json')
+
+@app.route('/superadmin/restore', methods=['POST'])
+@login_required
+def superadmin_restore():
+    if current_user.role != 'superadmin':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    file = request.files.get('backup_file')
+    if not file:
+        flash('No file uploaded', 'danger')
+        return redirect(url_for('superadmin_dashboard'))
+    # For security, we do not automatically restore; show message
+    flash('Restore feature requires manual merge for security', 'warning')
+    return redirect(url_for('superadmin_dashboard'))
+
+# ----------------------------- MANAGEMENT LOGIN -----------------------------
+@app.route('/management/login', methods=['GET', 'POST'])
+def management_login():
+    if request.method == 'POST':
+        email = request.form['email']
+        password = request.form['password']
+        user = User.query.filter_by(email=email).first()
+        if user and user.check_password(password) and user.role != 'buyer' and user.status == 'active':
+            login_user(user)
+            if user.role == 'vendor':
+                return redirect(url_for('vendor_dashboard'))
+            elif user.role == 'technician':
+                return redirect(url_for('technician_dashboard'))
+            elif user.role == 'agent':
+                return redirect(url_for('agent_dashboard'))
+            elif user.role == 'installer':
+                return redirect(url_for('installer_dashboard'))
+            elif user.role == 'manager':
+                return redirect(url_for('manager_dashboard'))
+            elif user.role == 'superadmin':
+                return redirect(url_for('superadmin_dashboard'))
+        flash('Invalid credentials', 'danger')
+    return render_template('management_login.html')
+
+@app.route('/logout')
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for('index'))
+
+# ----------------------------- STATIC FILE SERVING -----------------------------
+@app.route('/static/uploads/<filename>')
+def uploaded_file(filename):
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+
+# ----------------------------- TEMPLATE WRITER -----------------------------
 def ensure_templates():
     os.makedirs('templates', exist_ok=True)
     templates = {
@@ -228,12 +807,29 @@ def ensure_templates():
 </html>''',
         'index.html': '''{% extends "base.html" %}
 {% block content %}
-<h2 class="mb-4">🔥 Factory Direct Prices</h2>
-<div class="row">
+<div class="row mb-4">
+    <div class="col-md-4">
+        <input type="text" id="searchInput" class="form-control" placeholder="Search products..." onkeyup="filterProducts()">
+    </div>
+    <div class="col-md-3">
+        <select id="categorySelect" class="form-select" onchange="filterProducts()">
+            <option value="all">All Categories</option>
+            <option value="Smartphones">Smartphones</option>
+            <option value="Laptops">Laptops</option>
+            <option value="eBooks">eBooks</option>
+            <option value="Accessories">Accessories</option>
+        </select>
+    </div>
+</div>
+<div id="productsGrid" class="row">
     {% for product in products %}
-    <div class="col-md-4 col-lg-3 mb-4">
+    <div class="col-md-4 col-lg-3 mb-4 product-item" data-name="{{ product.name|lower }}" data-category="{{ product.category }}">
         <div class="card h-100 p-3">
-            <img src="{{ product.image_url or 'https://via.placeholder.com/300' }}" class="card-img-top" style="height: 180px; object-fit: cover;">
+            {% if product.image_filename %}
+                <img src="{{ url_for('uploaded_file', filename=product.image_filename) }}" class="card-img-top" style="height: 180px; object-fit: cover;">
+            {% else %}
+                <img src="https://via.placeholder.com/300" class="card-img-top" style="height: 180px; object-fit: cover;">
+            {% endif %}
             <div class="card-body">
                 <h5 class="card-title">{{ product.name }}</h5>
                 <div class="text-gold fw-bold">UGX {{ product.price|int }}</div>
@@ -248,6 +844,21 @@ def ensure_templates():
     </div>
     {% endfor %}
 </div>
+<script>
+function filterProducts() {
+    const search = document.getElementById('searchInput').value.toLowerCase();
+    const category = document.getElementById('categorySelect').value;
+    const items = document.querySelectorAll('.product-item');
+    items.forEach(item => {
+        const name = item.dataset.name;
+        const cat = item.dataset.category;
+        let match = true;
+        if (search && !name.includes(search)) match = false;
+        if (category !== 'all' && cat !== category) match = false;
+        item.style.display = match ? '' : 'none';
+    });
+}
+</script>
 {% endblock %}''',
         'register.html': '''{% extends "base.html" %}
 {% block content %}
@@ -341,7 +952,11 @@ def ensure_templates():
     {% for product in products[:4] %}
     <div class="col-md-3 mb-3">
         <div class="card h-100 p-2">
-            <img src="{{ product.image_url or 'https://via.placeholder.com/200' }}" class="card-img-top" style="height: 120px; object-fit: cover;">
+            {% if product.image_filename %}
+                <img src="{{ url_for('uploaded_file', filename=product.image_filename) }}" class="card-img-top" style="height: 120px; object-fit: cover;">
+            {% else %}
+                <img src="https://via.placeholder.com/200" class="card-img-top">
+            {% endif %}
             <div class="card-body p-2">
                 <h6>{{ product.name }}</h6>
                 <div class="text-gold fw-bold">UGX {{ product.price|int }}</div>
@@ -359,103 +974,122 @@ def ensure_templates():
 <div class="card mb-3 p-3">
     <div><strong>Order #{{ order.id }}</strong> - {{ order.created_at.strftime('%Y-%m-%d %H:%M') }} - Status: {{ order.status }}</div>
     <div>Total: UGX {{ order.total|int }}</div>
-    <a href="{{ url_for('track_order', order_id=order.id) }}" class="btn btn-sm btn-outline-gold">Track</a>
-    {% if order.status == 'pending' %}
-        <a href="{{ url_for('cancel_order', order_id=order.id) }}" class="btn btn-sm btn-danger">Cancel</a>
-    {% endif %}
-    {% if order.status == 'delivered' %}
-        <form method="POST" action="{{ url_for('return_order', order_id=order.id) }}" class="d-inline">
-            <input type="text" name="reason" placeholder="Reason" required>
-            <button type="submit" class="btn btn-sm btn-warning">Request Return</button>
-        </form>
-    {% endif %}
+    <a href="{{ url_for('view_order', order_id=order.id) }}" class="btn btn-sm btn-outline-gold">View Details</a>
 </div>
 {% else %}
 <p>No orders yet.</p>
 {% endfor %}
 {% endblock %}''',
-        'track_order.html': '''{% extends "base.html" %}
-{% block content %}
-<h2>Track Order #{{ order.id }}</h2>
-<div class="progress mb-3">
-    <div class="progress-bar bg-gold" style="width: {% if order.status == 'pending' %}25{% elif order.status == 'processing' %}50{% elif order.status == 'shipped' %}75{% elif order.status == 'delivered' %}100{% else %}0{% endif %}%"></div>
-</div>
-<p>Status: {{ order.status }}</p>
-<p>Estimated delivery: {% if order.status == 'shipped' %}2‑3 days{% else %}Pending{% endif %}</p>
-<a href="{{ url_for('customer_orders') }}" class="btn btn-gold">Back</a>
-{% endblock %}''',
         'checkout.html': '''{% extends "base.html" %}
 {% block content %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <h2>Checkout</h2>
 <form method="POST">
     <div class="mb-3"><label>Delivery Address</label><input type="text" name="address" class="form-control" required></div>
+    <div class="mb-3"><label>Pick your delivery location on the map</label><div id="map" style="height: 300px;"></div></div>
+    <input type="hidden" id="lat" name="lat">
+    <input type="hidden" id="lng" name="lng">
     <div class="card p-3 mb-3">
         <h4>Order Summary</h4>
         {% for item in cart_items %}
             <div>{{ item.product.name }} x{{ item.quantity }} = UGX {{ (item.product.price * item.quantity)|int }}</div>
         {% endfor %}
         <hr>
-        <strong>Total: UGX {{ cart_items|sum(attribute='product.price')|int }}</strong>
+        <strong>Subtotal: UGX {{ cart_items|sum(attribute='product.price')|int }}</strong><br>
+        <strong>Delivery fee: will be calculated after location selection</strong><br>
+        <strong>Deposit (50%): will be calculated</strong><br>
+        <strong>Balance (50%): will be calculated</strong>
     </div>
-    <button type="submit" class="btn btn-gold">Place Order</button>
+    <button type="submit" class="btn btn-gold">Place Order (Pay 50% Deposit)</button>
 </form>
-{% endblock %}''',
-        'wishlist.html': '''{% extends "base.html" %}
-{% block content %}
-<h2>My Wishlist</h2>
-<div class="row">
-    {% for product in products %}
-    <div class="col-md-3 mb-3">
-        <div class="card p-2">
-            <img src="{{ product.image_url or 'https://via.placeholder.com/200' }}" class="card-img-top">
-            <h6>{{ product.name }}</h6>
-            <div>UGX {{ product.price|int }}</div>
-            <a href="{{ url_for('add_to_cart', product_id=product.id) }}" class="btn btn-sm btn-gold">Add to Cart</a>
-            <a href="{{ url_for('toggle_wishlist', product_id=product.id) }}" class="btn btn-sm btn-danger">Remove</a>
-        </div>
-    </div>
-    {% endfor %}
-</div>
-{% endblock %}''',
-        'repair_request.html': '''{% extends "base.html" %}
-{% block content %}
-<div class="row justify-content-center">
-    <div class="col-md-6">
-        <div class="card p-4">
-            <h2>Request Repair</h2>
-            <form method="POST">
-                <div class="mb-3"><label>Device</label><input type="text" name="device" class="form-control" required></div>
-                <div class="mb-3"><label>Issue</label><textarea name="issue" class="form-control" rows="3" required></textarea></div>
-                <button type="submit" class="btn btn-gold">Submit</button>
-            </form>
-        </div>
-    </div>
-</div>
-{% endblock %}''',
-        'my_repairs.html': '''{% extends "base.html" %}
-{% block content %}
-<h2>My Repairs</h2>
-<ul>
-    {% for r in repairs %}
-    <li>{{ r.device }} - {{ r.status }} ({{ r.created_at.strftime('%Y-%m-%d') }})</li>
-    {% endfor %}
-</ul>
-{% endblock %}''',
-        'referral.html': '''{% extends "base.html" %}
-{% block content %}
-<div class="card p-4 text-center">
-    <h2>Refer a Friend</h2>
-    <p>Share this link and get UGX 5,000 credit when they sign up:</p>
-    <input type="text" class="form-control" value="{{ link }}" id="referralLink" readonly>
-    <button class="btn btn-gold mt-2" onclick="copyLink()">Copy Link</button>
-</div>
 <script>
-function copyLink() {
-    var copyText = document.getElementById("referralLink");
-    copyText.select();
-    document.execCommand("copy");
-    alert("Link copied!");
-}
+    var map = L.map('map').setView([0.3136, 32.5811], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+    var marker;
+    map.on('click', function(e) {
+        if (marker) map.removeLayer(marker);
+        marker = L.marker(e.latlng).addTo(map);
+        document.getElementById('lat').value = e.latlng.lat;
+        document.getElementById('lng').value = e.latlng.lng;
+    });
+</script>
+{% endblock %}''',
+        'order_detail.html': '''{% extends "base.html" %}
+{% block content %}
+<h2>Order #{{ order.id }}</h2>
+<p>Status: {{ order.status }}</p>
+<p>Delivery address: {{ order.delivery_address }}</p>
+<p>Transport fee: UGX {{ order.transport_fee|int }}</p>
+<p>Deposit paid: UGX {{ order.deposit_paid|int }}</p>
+<p>Balance due: UGX {{ order.balance|int }}</p>
+{% if delivery %}
+    <p>Agent: {{ agent.name }} ({{ agent.phone }})</p>
+    <div id="agentMap" style="height: 300px;"></div>
+    <a href="{{ url_for('order_chat', order_id=order.id) }}" class="btn btn-gold">Chat with Agent</a>
+    {% if not delivery.customer_confirmed_arrival %}
+        <form method="POST" action="{{ url_for('confirm_arrival', order_id=order.id) }}">
+            <button type="submit" class="btn btn-success">Confirm Arrival & Pay Balance</button>
+        </form>
+    {% endif %}
+{% else %}
+    <p>No delivery assigned yet.</p>
+{% endif %}
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+    var map = L.map('agentMap').setView([0.3136, 32.5811], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+    function updateAgentLocation() {
+        fetch('/api/agent/location/{{ delivery.agent_id if delivery else 0 }}')
+            .then(r => r.json())
+            .then(data => {
+                if (data.lat && data.lng) {
+                    if (window.agentMarker) map.removeLayer(window.agentMarker);
+                    window.agentMarker = L.marker([data.lat, data.lng]).addTo(map).bindPopup('Agent').openPopup();
+                    map.setView([data.lat, data.lng], 13);
+                }
+            });
+    }
+    updateAgentLocation();
+    setInterval(updateAgentLocation, 5000);
+</script>
+{% endblock %}''',
+        'order_chat.html': '''{% extends "base.html" %}
+{% block content %}
+<h2>Chat with Delivery Agent</h2>
+<div id="chatMessages" style="height: 400px; overflow-y: auto; background: #1a1a2e; border-radius: 10px; padding: 10px;"></div>
+<input type="text" id="messageInput" class="form-control mt-2" placeholder="Type your message...">
+<button id="sendBtn" class="btn btn-gold mt-2">Send</button>
+<script>
+    const deliveryId = {{ delivery.id }};
+    function loadMessages() {
+        fetch(`/api/chat/${deliveryId}`)
+            .then(r => r.json())
+            .then(messages => {
+                const container = document.getElementById('chatMessages');
+                container.innerHTML = '';
+                messages.forEach(m => {
+                    const div = document.createElement('div');
+                    div.textContent = `${m.sender}: ${m.message}`;
+                    container.appendChild(div);
+                });
+                container.scrollTop = container.scrollHeight;
+            });
+    }
+    document.getElementById('sendBtn').onclick = () => {
+        const msg = document.getElementById('messageInput').value;
+        if (!msg) return;
+        fetch(`/api/chat/${deliveryId}`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({message: msg})
+        }).then(() => {
+            document.getElementById('messageInput').value = '';
+            loadMessages();
+        });
+    };
+    loadMessages();
+    setInterval(loadMessages, 2000);
 </script>
 {% endblock %}''',
         'management_login.html': '''{% extends "base.html" %}
@@ -483,7 +1117,12 @@ function copyLink() {
             <h4>Your Products</h4>
             {% for product in products %}
             <div class="d-flex justify-content-between align-items-center border-bottom py-2">
-                <span>{{ product.name }} - UGX {{ product.price|int }} (Stock: {{ product.stock }})</span>
+                <div>
+                    <strong>{{ product.name }}</strong> - UGX {{ product.price|int }} (Stock: {{ product.stock }})
+                    {% if product.image_filename %}
+                        <br><img src="{{ url_for('uploaded_file', filename=product.image_filename) }}" style="height: 50px;">
+                    {% endif %}
+                </div>
                 <a href="{{ url_for('vendor_delete_product', product_id=product.id) }}" class="btn btn-sm btn-danger">Delete</a>
             </div>
             {% else %}
@@ -494,13 +1133,13 @@ function copyLink() {
     <div class="col-md-6">
         <div class="card p-3">
             <h4>Add Product</h4>
-            <form method="POST" action="{{ url_for('vendor_add_product') }}">
+            <form method="POST" action="{{ url_for('vendor_add_product') }}" enctype="multipart/form-data">
                 <input type="text" name="name" class="form-control mb-2" placeholder="Name" required>
                 <input type="number" name="price" class="form-control mb-2" placeholder="Price" required>
                 <input type="number" name="market_price" class="form-control mb-2" placeholder="Market Price" required>
                 <input type="text" name="category" class="form-control mb-2" placeholder="Category">
                 <input type="number" name="stock" class="form-control mb-2" placeholder="Stock" required>
-                <input type="text" name="image_url" class="form-control mb-2" placeholder="Image URL">
+                <input type="file" name="image" class="form-control mb-2" accept="image/*">
                 <textarea name="description" class="form-control mb-2" placeholder="Description"></textarea>
                 <button type="submit" class="btn btn-gold w-100">Add Product</button>
             </form>
@@ -583,48 +1222,33 @@ function copyLink() {
         'installer_dashboard.html': '''{% extends "base.html" %}
 {% block content %}
 <h2>Installer Dashboard</h2>
-<p>Welcome, {{ current_user.name }}</p>
-{% for inst in installations %}
-<div class="card p-2 mb-2">
-    Order {{ inst.order_id }} - Status: {{ inst.status }}
-    <form method="POST" action="{{ url_for('installer_update', inst_id=inst.id) }}">
-        <select name="status">
-            <option value="pending">Pending</option>
-            <option value="in_progress">In Progress</option>
-            <option value="completed">Completed</option>
-        </select>
-        <button type="submit">Update</button>
-    </form>
-</div>
-{% else %}
-<p>No installations assigned.</p>
-{% endfor %}
+<p>Installation requests will appear here.</p>
 {% endblock %}''',
         'manager_dashboard.html': '''{% extends "base.html" %}
 {% block content %}
 <h2>Manager Dashboard</h2>
 <div class="row">
-    <div class="col-md-3"><div class="card p-3 text-center"><h3>{{ vendors }}</h3><p>Vendors</p></div></div>
-    <div class="col-md-3"><div class="card p-3 text-center"><h3>{{ orders }}</h3><p>Orders</p></div></div>
-    <div class="col-md-3"><div class="card p-3 text-center"><h3>UGX {{ revenue|int }}</h3><p>Revenue</p></div></div>
-    <div class="col-md-3"><div class="card p-3 text-center"><h3>{{ disputes }}</h3><p>Open Disputes</p></div></div>
+    <div class="col-md-6">
+        <h3>Active Deliveries</h3>
+        <ul>
+        {% for d in deliveries %}
+            <li>Order {{ d.order_id }} – Agent {{ d.agent_id }} – Status {{ d.status }}</li>
+        {% endfor %}
+        </ul>
+    </div>
+    <div class="col-md-6">
+        <h3>Reassign Delivery</h3>
+        <form method="POST" action="{{ url_for('reassign_delivery', delivery_id=delivery.id) }}">
+            <select name="agent_id">
+                {% for agent in agents %}
+                <option value="{{ agent.id }}">{{ agent.name }}</option>
+                {% endfor %}
+            </select>
+            <input type="hidden" name="delivery_id" value="{{ delivery.id }}">
+            <button type="submit" class="btn btn-gold">Reassign</button>
+        </form>
+    </div>
 </div>
-<a href="{{ url_for('manager_disputes') }}" class="btn btn-gold mt-3">Manage Disputes</a>
-{% endblock %}''',
-        'manager_disputes.html': '''{% extends "base.html" %}
-{% block content %}
-<h2>Disputes</h2>
-{% for d in disputes %}
-<div class="card p-3 mb-2">
-    <div>Order {{ d.order_id }} – Reason: {{ d.reason }}</div>
-    <form method="POST" action="{{ url_for('resolve_dispute', dispute_id=d.id) }}">
-        <input type="text" name="resolution" placeholder="Resolution" class="form-control mb-2">
-        <button type="submit" class="btn btn-sm btn-gold">Resolve</button>
-    </form>
-</div>
-{% else %}
-<p>No disputes.</p>
-{% endfor %}
 {% endblock %}''',
         'superadmin_dashboard.html': '''{% extends "base.html" %}
 {% block content %}
@@ -657,7 +1281,7 @@ function copyLink() {
 </form>
 <h3 class="mt-4">User List</h3>
 <table class="table table-dark">
-    <thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Actions</th></tr></thead>
+    <thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Actions</th></table></thead>
     <tbody>
     {% for u in users %}
     <tr>
@@ -675,605 +1299,27 @@ function copyLink() {
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(content)
 
-# Call the function to ensure templates are created
 ensure_templates()
 
-# ------------------------------------------------------------
-# Routes (all business logic)
-# ------------------------------------------------------------
-@app.route('/')
-def index():
-    products = Product.query.all()
-    return render_template('index.html', products=products)
+# ----------------------------- STATIC FILES -----------------------------
+from flask import send_from_directory
+@app.route('/static/uploads/<filename>')
+def uploaded_file(filename):
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
-@app.route('/register', methods=['GET', 'POST'])
-def register():
-    if request.method == 'POST':
-        name = request.form['name']
-        email = request.form['email']
-        phone = request.form['phone']
-        password = request.form['password']
-        if User.query.filter_by(email=email).first():
-            flash('Email already registered', 'danger')
-            return redirect(url_for('register'))
-        user = User(name=name, email=email, phone=phone, role='buyer')
-        user.set_password(password)
-        db.session.add(user)
-        db.session.commit()
-        flash('Account created! Please login.', 'success')
-        return redirect(url_for('customer_login'))
-    return render_template('register.html')
-
-@app.route('/customer/login', methods=['GET', 'POST'])
-def customer_login():
-    if request.method == 'POST':
-        email = request.form['email']
-        password = request.form['password']
-        user = User.query.filter_by(email=email).first()
-        if user and user.check_password(password) and user.role == 'buyer' and user.status == 'active':
-            login_user(user)
-            add_audit('Customer login', user.email)
-            return redirect(url_for('customer_dashboard'))
-        flash('Invalid credentials', 'danger')
-    return render_template('customer_login.html')
-
-@app.route('/customer/dashboard')
-@login_required
-def customer_dashboard():
-    if current_user.role != 'buyer':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    products = Product.query.all()
-    cart_items = CartItem.query.filter_by(user_id=current_user.id).all()
-    recent_ids = session.get('recently_viewed', [])
-    recent_products = [Product.query.get(pid) for pid in recent_ids[-4:] if Product.query.get(pid)]
-    return render_template('customer_dashboard.html', products=products, cart_items=cart_items, recent_products=recent_products)
-
-@app.route('/add-to-cart/<int:product_id>')
-@login_required
-def add_to_cart(product_id):
-    if current_user.role != 'buyer':
-        flash('Only customers can add to cart', 'danger')
-        return redirect(url_for('index'))
-    cart_item = CartItem.query.filter_by(user_id=current_user.id, product_id=product_id).first()
-    if cart_item:
-        cart_item.quantity += 1
-    else:
-        cart_item = CartItem(user_id=current_user.id, product_id=product_id, quantity=1)
-        db.session.add(cart_item)
-    db.session.commit()
-    flash('Product added to cart', 'success')
-    return redirect(url_for('customer_dashboard'))
-
-@app.route('/remove-from-cart/<int:item_id>')
-@login_required
-def remove_from_cart(item_id):
-    item = db.session.get(CartItem, item_id)
-    if item and item.user_id == current_user.id:
-        db.session.delete(item)
-        db.session.commit()
-        flash('Item removed', 'success')
-    return redirect(url_for('customer_dashboard'))
-
-@app.route('/update-cart/<int:item_id>', methods=['POST'])
-@login_required
-def update_cart(item_id):
-    item = db.session.get(CartItem, item_id)
-    if item and item.user_id == current_user.id:
-        new_qty = int(request.form['quantity'])
-        if new_qty <= 0:
-            db.session.delete(item)
-        else:
-            item.quantity = new_qty
-        db.session.commit()
-    return redirect(url_for('customer_dashboard'))
-
-@app.route('/checkout', methods=['GET', 'POST'])
-@login_required
-def checkout():
-    if current_user.role != 'buyer':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    cart_items = CartItem.query.filter_by(user_id=current_user.id).all()
-    if not cart_items:
-        flash('Cart is empty', 'danger')
-        return redirect(url_for('customer_dashboard'))
-    if request.method == 'POST':
-        address = request.form['address']
-        total = 0
-        items_list = []
-        for item in cart_items:
-            product = item.product
-            if product.stock < item.quantity:
-                flash(f'Not enough stock for {product.name}', 'danger')
-                return redirect(url_for('customer_dashboard'))
-            product.stock -= item.quantity
-            total += product.price * item.quantity
-            items_list.append({'id': product.id, 'name': product.name, 'price': product.price, 'quantity': item.quantity})
-            db.session.delete(item)
-        order_id = 'ORD' + str(int(datetime.utcnow().timestamp()))
-        order = Order(id=order_id, user_id=current_user.id, total=total, items=json.dumps(items_list), delivery_address=address)
-        db.session.add(order)
-        db.session.commit()
-        add_audit('Order placed', f'Order {order_id} total UGX {total}')
-        flash(f'Order placed! Order ID: {order_id}', 'success')
-        return redirect(url_for('customer_orders'))
-    return render_template('checkout.html', cart_items=cart_items)
-
-@app.route('/customer/orders')
-@login_required
-def customer_orders():
-    if current_user.role != 'buyer':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    orders = Order.query.filter_by(user_id=current_user.id).order_by(Order.created_at.desc()).all()
-    return render_template('customer_orders.html', orders=orders)
-
-@app.route('/track-order/<order_id>')
-@login_required
-def track_order(order_id):
-    order = Order.query.get_or_404(order_id)
-    if order.user_id != current_user.id and current_user.role != 'superadmin':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    return render_template('track_order.html', order=order)
-
-@app.route('/cancel-order/<order_id>')
-@login_required
-def cancel_order(order_id):
-    order = Order.query.get_or_404(order_id)
-    if order.user_id != current_user.id or order.status != 'pending':
-        flash('Cannot cancel this order', 'danger')
-        return redirect(url_for('customer_orders'))
-    order.status = 'cancelled'
-    db.session.commit()
-    add_audit('Order cancelled', order_id)
-    flash('Order cancelled', 'success')
-    return redirect(url_for('customer_orders'))
-
-@app.route('/return-order/<order_id>', methods=['POST'])
-@login_required
-def return_order(order_id):
-    order = Order.query.get_or_404(order_id)
-    if order.user_id != current_user.id or order.status != 'delivered':
-        flash('Only delivered orders can be returned', 'danger')
-        return redirect(url_for('customer_orders'))
-    reason = request.form['reason']
-    order.status = 'return-requested'
-    order.return_reason = reason
-    db.session.commit()
-    flash('Return request submitted', 'success')
-    return redirect(url_for('customer_orders'))
-
-@app.route('/wishlist/toggle/<int:product_id>')
-@login_required
-def toggle_wishlist(product_id):
-    if current_user.role != 'buyer':
-        flash('Please login as customer', 'danger')
-        return redirect(url_for('index'))
-    existing = Wishlist.query.filter_by(user_id=current_user.id, product_id=product_id).first()
-    if existing:
-        db.session.delete(existing)
-        flash('Removed from wishlist', 'info')
-    else:
-        wish = Wishlist(user_id=current_user.id, product_id=product_id)
-        db.session.add(wish)
-        flash('Added to wishlist', 'success')
-    db.session.commit()
-    return redirect(request.referrer or url_for('index'))
-
-@app.route('/wishlist')
-@login_required
-def wishlist_page():
-    if current_user.role != 'buyer':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    items = Wishlist.query.filter_by(user_id=current_user.id).all()
-    products = [item.product for item in items]
-    return render_template('wishlist.html', products=products)
-
-@app.route('/repair-request', methods=['GET', 'POST'])
-@login_required
-def repair_request():
-    if current_user.role != 'buyer':
-        flash('Only customers can request repairs', 'danger')
-        return redirect(url_for('index'))
-    if request.method == 'POST':
-        device = request.form['device']
-        issue = request.form['issue']
-        repair = Repair(user_id=current_user.id, device=device, issue=issue)
-        db.session.add(repair)
-        db.session.commit()
-        flash('Repair request submitted', 'success')
-        return redirect(url_for('customer_dashboard'))
-    return render_template('repair_request.html')
-
-@app.route('/my-repairs')
-@login_required
-def my_repairs():
-    if current_user.role != 'buyer':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    repairs = Repair.query.filter_by(user_id=current_user.id).all()
-    return render_template('my_repairs.html', repairs=repairs)
-
-@app.route('/referral-link')
-@login_required
-def referral_link():
-    if current_user.role != 'buyer':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    link = url_for('register', _external=True) + f'?ref={current_user.id}'
-    return render_template('referral.html', link=link)
-
-@app.route('/product/<int:product_id>/review', methods=['POST'])
-@login_required
-def add_review(product_id):
-    if current_user.role != 'buyer':
-        flash('Only customers can review', 'danger')
-        return redirect(url_for('index'))
-    rating = int(request.form['rating'])
-    comment = request.form['comment']
-    review = Review(product_id=product_id, user_id=current_user.id, rating=rating, comment=comment)
-    db.session.add(review)
-    product = Product.query.get(product_id)
-    ratings = json.loads(product.ratings)
-    ratings.append(rating)
-    product.ratings = json.dumps(ratings)
-    db.session.commit()
-    flash('Review added', 'success')
-    return redirect(request.referrer)
-
-@app.route('/recently-viewed/<int:product_id>')
-def recently_viewed(product_id):
-    recent = session.get('recently_viewed', [])
-    if product_id in recent:
-        recent.remove(product_id)
-    recent.insert(0, product_id)
-    session['recently_viewed'] = recent[:5]
-    return '', 204
-
-# ------------------------------------------------------------
-# Management Login
-# ------------------------------------------------------------
-@app.route('/management/login', methods=['GET', 'POST'])
-def management_login():
-    if request.method == 'POST':
-        email = request.form['email']
-        password = request.form['password']
-        user = User.query.filter_by(email=email).first()
-        if user and user.check_password(password) and user.role != 'buyer' and user.status == 'active':
-            login_user(user)
-            add_audit('Management login', f'{user.role} {user.email}')
-            if user.role == 'vendor':
-                return redirect(url_for('vendor_dashboard'))
-            elif user.role == 'technician':
-                return redirect(url_for('technician_dashboard'))
-            elif user.role == 'agent':
-                return redirect(url_for('agent_dashboard'))
-            elif user.role == 'installer':
-                return redirect(url_for('installer_dashboard'))
-            elif user.role == 'manager':
-                return redirect(url_for('manager_dashboard'))
-            elif user.role == 'superadmin':
-                return redirect(url_for('superadmin_dashboard'))
-        flash('Invalid credentials', 'danger')
-    return render_template('management_login.html')
-
-# ------------------------------------------------------------
-# Vendor Dashboard
-# ------------------------------------------------------------
-@app.route('/vendor/dashboard')
-@login_required
-def vendor_dashboard():
-    if current_user.role != 'vendor':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    products = Product.query.filter_by(vendor_id=current_user.id).all()
-    earnings = sum([p.price for p in products]) * get_settings().vendor_commission
-    return render_template('vendor_dashboard.html', products=products, earnings=earnings)
-
-@app.route('/vendor/add-product', methods=['POST'])
-@login_required
-def vendor_add_product():
-    if current_user.role != 'vendor':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    name = request.form['name']
-    price = float(request.form['price'])
-    market_price = float(request.form['market_price'])
-    category = request.form['category']
-    stock = int(request.form['stock'])
-    image_url = request.form['image_url']
-    desc = request.form['description']
-    product = Product(name=name, price=price, market_price=market_price, category=category,
-                     stock=stock, image_url=image_url, description=desc, vendor_id=current_user.id)
-    db.session.add(product)
-    db.session.commit()
-    flash('Product added', 'success')
-    return redirect(url_for('vendor_dashboard'))
-
-@app.route('/vendor/delete-product/<int:product_id>')
-@login_required
-def vendor_delete_product(product_id):
-    if current_user.role != 'vendor':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    product = db.session.get(Product, product_id)
-    if product and product.vendor_id == current_user.id:
-        db.session.delete(product)
-        db.session.commit()
-        flash('Product deleted', 'success')
-    return redirect(url_for('vendor_dashboard'))
-
-@app.route('/vendor/workers')
-@login_required
-def vendor_workers():
-    if current_user.role != 'vendor':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    workers = User.query.filter(User.role.in_(['technician', 'agent', 'installer'])).all()
-    return render_template('vendor_workers.html', workers=workers)
-
-# ------------------------------------------------------------
-# Technician Dashboard
-# ------------------------------------------------------------
-@app.route('/technician/dashboard')
-@login_required
-def technician_dashboard():
-    if current_user.role != 'technician':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    repairs = Repair.query.filter_by(assigned_technician_id=current_user.id).all()
-    earnings = sum([r.quote or 0 for r in repairs if r.status == 'completed'])
-    return render_template('technician_dashboard.html', repairs=repairs, earnings=earnings)
-
-@app.route('/technician/update-repair/<int:repair_id>', methods=['POST'])
-@login_required
-def technician_update_repair(repair_id):
-    if current_user.role != 'technician':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    repair = db.session.get(Repair, repair_id)
-    if repair and repair.assigned_technician_id == current_user.id:
-        repair.status = request.form['status']
-        db.session.commit()
-        flash('Repair updated', 'success')
-    return redirect(url_for('technician_dashboard'))
-
-# ------------------------------------------------------------
-# Agent Dashboard
-# ------------------------------------------------------------
-@app.route('/agent/dashboard')
-@login_required
-def agent_dashboard():
-    if current_user.role != 'agent':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    deliveries = Delivery.query.filter_by(agent_id=current_user.id).all()
-    points = calculate_agent_points(current_user.id)
-    salary = calculate_agent_salary(current_user.id)
-    return render_template('agent_dashboard.html', deliveries=deliveries, points=points, salary=salary)
-
-@app.route('/agent/update-delivery/<int:delivery_id>', methods=['POST'])
-@login_required
-def agent_update_delivery(delivery_id):
-    if current_user.role != 'agent':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    delivery = db.session.get(Delivery, delivery_id)
-    if delivery and delivery.agent_id == current_user.id:
-        delivery.status = request.form['status']
-        if delivery.status == 'delivered':
-            delivery.completed_at = datetime.utcnow()
-        db.session.commit()
-        flash('Delivery updated', 'success')
-    return redirect(url_for('agent_dashboard'))
-
-@app.route('/agent/withdraw', methods=['POST'])
-@login_required
-def agent_withdraw():
-    if current_user.role != 'agent':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    amount = float(request.form['amount'])
-    if amount > current_user.balance:
-        flash('Insufficient balance', 'danger')
-        return redirect(url_for('agent_dashboard'))
-    current_user.balance -= amount
-    db.session.commit()
-    flash('Withdrawal request submitted', 'success')
-    return redirect(url_for('agent_dashboard'))
-
-# ------------------------------------------------------------
-# Installer Dashboard
-# ------------------------------------------------------------
-@app.route('/installer/dashboard')
-@login_required
-def installer_dashboard():
-    if current_user.role != 'installer':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    installations = Installation.query.filter_by(installer_id=current_user.id).all()
-    return render_template('installer_dashboard.html', installations=installations)
-
-@app.route('/installer/update-installation/<int:inst_id>', methods=['POST'])
-@login_required
-def installer_update(inst_id):
-    if current_user.role != 'installer':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    inst = db.session.get(Installation, inst_id)
-    if inst and inst.installer_id == current_user.id:
-        inst.status = request.form['status']
-        db.session.commit()
-        flash('Installation updated', 'success')
-    return redirect(url_for('installer_dashboard'))
-
-# ------------------------------------------------------------
-# Manager Dashboard
-# ------------------------------------------------------------
-@app.route('/manager/dashboard')
-@login_required
-def manager_dashboard():
-    if current_user.role != 'manager':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    vendors = User.query.filter_by(role='vendor').count()
-    total_orders = Order.query.count()
-    total_revenue = db.session.query(db.func.sum(Order.total)).scalar() or 0
-    disputes = Dispute.query.filter_by(status='open').count()
-    return render_template('manager_dashboard.html', vendors=vendors, orders=total_orders,
-                           revenue=total_revenue, disputes=disputes)
-
-@app.route('/manager/disputes')
-@login_required
-def manager_disputes():
-    if current_user.role != 'manager':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    disputes = Dispute.query.all()
-    return render_template('manager_disputes.html', disputes=disputes)
-
-@app.route('/manager/resolve-dispute/<int:dispute_id>', methods=['POST'])
-@login_required
-def resolve_dispute(dispute_id):
-    if current_user.role != 'manager':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    dispute = db.session.get(Dispute, dispute_id)
-    if dispute:
-        dispute.status = 'resolved'
-        dispute.resolution = request.form['resolution']
-        db.session.commit()
-        flash('Dispute resolved', 'success')
-    return redirect(url_for('manager_disputes'))
-
-# ------------------------------------------------------------
-# SuperAdmin Dashboard
-# ------------------------------------------------------------
-@app.route('/superadmin/dashboard')
-@login_required
-def superadmin_dashboard():
-    if current_user.role != 'superadmin':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    users = User.query.all()
-    products = Product.query.all()
-    orders = Order.query.all()
-    settings = get_settings()
-    return render_template('superadmin_dashboard.html', users=users, products=products, orders=orders, settings=settings)
-
-@app.route('/superadmin/create-user', methods=['POST'])
-@login_required
-def superadmin_create_user():
-    if current_user.role != 'superadmin':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    name = request.form['name']
-    email = request.form['email']
-    phone = request.form['phone']
-    role = request.form['role']
-    password = request.form['password']
-    if User.query.filter_by(email=email).first():
-        flash('Email already exists', 'danger')
-        return redirect(url_for('superadmin_dashboard'))
-    user = User(name=name, email=email, phone=phone, role=role)
-    user.set_password(password)
-    db.session.add(user)
-    db.session.commit()
-    add_audit('Create user', f'Created {role} {email}')
-    flash('User created', 'success')
-    return redirect(url_for('superadmin_dashboard'))
-
-@app.route('/superadmin/delete-user/<int:user_id>')
-@login_required
-def superadmin_delete_user(user_id):
-    if current_user.role != 'superadmin':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    user = db.session.get(User, user_id)
-    if user and user.id != current_user.id:
-        db.session.delete(user)
-        db.session.commit()
-        flash('User deleted', 'success')
-    return redirect(url_for('superadmin_dashboard'))
-
-@app.route('/superadmin/settings', methods=['POST'])
-@login_required
-def superadmin_settings():
-    if current_user.role != 'superadmin':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    settings = get_settings()
-    settings.vendor_commission = float(request.form['vendor_commission']) / 100
-    settings.agent_base_salary = float(request.form['agent_base_salary'])
-    db.session.commit()
-    flash('Settings updated', 'success')
-    return redirect(url_for('superadmin_dashboard'))
-
-@app.route('/superadmin/backup')
-@login_required
-def superadmin_backup():
-    if current_user.role != 'superadmin':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    data = {
-        'users': [{'id': u.id, 'email': u.email, 'name': u.name, 'role': u.role} for u in User.query.all()],
-        'products': [{'id': p.id, 'name': p.name, 'price': p.price} for p in Product.query.all()],
-        'orders': [{'id': o.id, 'total': o.total, 'status': o.status} for o in Order.query.all()]
-    }
-    json_str = json.dumps(data, indent=2)
-    return send_file(io.BytesIO(json_str.encode()), as_attachment=True, download_name='cybervault_backup.json', mimetype='application/json')
-
-@app.route('/superadmin/restore', methods=['POST'])
-@login_required
-def superadmin_restore():
-    if current_user.role != 'superadmin':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    file = request.files.get('backup_file')
-    if not file:
-        flash('No file uploaded', 'danger')
-        return redirect(url_for('superadmin_dashboard'))
-    # For security, we do not automatically restore; show message
-    flash('Restore feature requires manual merge for security', 'warning')
-    return redirect(url_for('superadmin_dashboard'))
-
-# ------------------------------------------------------------
-# Logout
-# ------------------------------------------------------------
-@app.route('/logout')
-@login_required
-def logout():
-    add_audit('Logout', current_user.email)
-    logout_user()
-    return redirect(url_for('index'))
-
-# ------------------------------------------------------------
-# Run the app
-# ------------------------------------------------------------
+# ----------------------------- RUN -----------------------------
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
-        # Create default superadmin if none exists
         if not User.query.filter_by(role='superadmin').first():
             admin = User(name='Maxwell', email='maxwell@cybervault.ug', phone='0708725402', role='superadmin')
             admin.set_password('amitra734')
             db.session.add(admin)
             db.session.commit()
-        # Create a sample product if none exists
         if not Product.query.first():
-            sample = Product(
-                name='Samsung Galaxy A54',
-                price=1250000,
-                market_price=1650000,
-                category='Smartphones',
-                stock=25,
-                image_url='https://images.unsplash.com/photo-1610945265064-0e34e5519bbf?w=400',
-                description='6.4" display, 50MP camera'
-            )
-            db.session.add(sample)
+            demo = Product(name='Samsung Galaxy A54', price=1250000, market_price=1650000, category='Smartphones', stock=25,
+                           image_filename=None, description='6.4" display')
+            db.session.add(demo)
             db.session.commit()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
