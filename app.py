@@ -9,748 +9,7 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key-change-in-production'
-app.config['UPLOAD_FOLDER'] = 'static/uploads'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-
-if os.environ.get('RENDER'):
-    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:////tmp/cybervault.db'
-else:
-    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///cybervault.db'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
-db = SQLAlchemy(app)
-login_manager = LoginManager(app)
-login_manager.login_view = 'customer_login'
-
-# ----------------------------- MODELS -----------------------------
-class User(UserMixin, db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    email = db.Column(db.String(100), unique=True, nullable=False)
-    password_hash = db.Column(db.String(200), nullable=False)
-    name = db.Column(db.String(100), nullable=False)
-    phone = db.Column(db.String(20))
-    role = db.Column(db.String(20), default='buyer')
-    balance = db.Column(db.Float, default=0.0)
-    business_name = db.Column(db.String(100))
-    specialty = db.Column(db.String(50))
-    status = db.Column(db.String(20), default='active')
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-    def set_password(self, password):
-        self.password_hash = generate_password_hash(password)
-
-    def check_password(self, password):
-        return check_password_hash(self.password_hash, password)
-
-class PlatformSettings(db.Model):
-    id = db.Column(db.Integer, primary_key=True, default=1)
-    vendor_commission = db.Column(db.Float, default=0.10)
-    agent_base_salary = db.Column(db.Float, default=300000)
-    delivery_rate_per_km = db.Column(db.Float, default=1000)
-    free_delivery_km = db.Column(db.Integer, default=5)
-
-class Product(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), nullable=False)
-    price = db.Column(db.Float, nullable=False)
-    market_price = db.Column(db.Float, nullable=False)
-    category = db.Column(db.String(50))
-    stock = db.Column(db.Integer, default=0)
-    image_filename = db.Column(db.String(200))
-    description = db.Column(db.Text)
-    vendor_id = db.Column(db.Integer, db.ForeignKey('user.id'))
-    ratings = db.Column(db.String(200), default='[]')
-    sold_today = db.Column(db.Integer, default=0)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-class CartItem(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
-    product_id = db.Column(db.Integer, db.ForeignKey('product.id'))
-    quantity = db.Column(db.Integer, default=1)
-    product = db.relationship('Product', backref='cart_items')
-
-class Wishlist(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
-    product_id = db.Column(db.Integer, db.ForeignKey('product.id'))
-
-class Order(db.Model):
-    id = db.Column(db.String(20), primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
-    total = db.Column(db.Float, nullable=False)
-    deposit_paid = db.Column(db.Float, default=0.0)
-    balance = db.Column(db.Float, default=0.0)
-    status = db.Column(db.String(20), default='pending')
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    items = db.Column(db.Text)
-    delivery_address = db.Column(db.String(200))
-    customer_lat = db.Column(db.Float)
-    customer_lng = db.Column(db.Float)
-    transport_fee = db.Column(db.Float, default=0.0)
-
-class Repair(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
-    device = db.Column(db.String(100))
-    issue = db.Column(db.Text)
-    assigned_technician_id = db.Column(db.Integer, db.ForeignKey('user.id'))
-    status = db.Column(db.String(20), default='pending')
-    quote = db.Column(db.Float)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-class DeliveryAssignment(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    order_id = db.Column(db.String(20), db.ForeignKey('order.id'))
-    agent_id = db.Column(db.Integer, db.ForeignKey('user.id'))
-    status = db.Column(db.String(20), default='assigned')
-    distance_km = db.Column(db.Float, default=0.0)
-    transport_fee = db.Column(db.Float, default=0.0)
-    assigned_at = db.Column(db.DateTime, default=datetime.utcnow)
-    customer_confirmed_arrival = db.Column(db.Boolean, default=False)
-    remaining_payment_confirmed = db.Column(db.Boolean, default=False)
-
-class AgentLocation(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    agent_id = db.Column(db.Integer, db.ForeignKey('user.id'))
-    lat = db.Column(db.Float, default=0.3136)
-    lng = db.Column(db.Float, default=32.5811)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-class ChatMessage(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    delivery_id = db.Column(db.Integer, db.ForeignKey('delivery_assignment.id'))
-    sender_id = db.Column(db.Integer, db.ForeignKey('user.id'))
-    message = db.Column(db.Text)
-    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
-
-class Review(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    product_id = db.Column(db.Integer, db.ForeignKey('product.id'))
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
-    rating = db.Column(db.Integer)
-    comment = db.Column(db.Text)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-class Dispute(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    order_id = db.Column(db.String(20))
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
-    reason = db.Column(db.Text)
-    status = db.Column(db.String(20), default='open')
-    resolution = db.Column(db.Text)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-class AuditLog(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
-    action = db.Column(db.String(200))
-    details = db.Column(db.Text)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-@login_manager.user_loader
-def load_user(user_id):
-    return db.session.get(User, int(user_id))
-
-# ----------------------------- HELPER FUNCTIONS -----------------------------
-def get_settings():
-    s = PlatformSettings.query.first()
-    if not s:
-        s = PlatformSettings()
-        db.session.add(s)
-        db.session.commit()
-    return s
-
-def haversine(lat1, lon1, lat2, lon2):
-    R = 6371
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
-    c = 2 * math.asin(math.sqrt(a))
-    return R * c
-
-def assign_agent_for_order(order_id, customer_lat, customer_lng):
-    agents = User.query.filter_by(role='agent', status='active').all()
-    if not agents:
-        return None
-    best_agent = None
-    best_dist = float('inf')
-    for agent in agents:
-        loc = AgentLocation.query.filter_by(agent_id=agent.id).first()
-        if not loc:
-            loc = AgentLocation(agent_id=agent.id, lat=0.3136, lng=32.5811)
-            db.session.add(loc)
-            db.session.commit()
-        dist = haversine(loc.lat, loc.lng, customer_lat, customer_lng)
-        if dist < best_dist:
-            best_dist = dist
-            best_agent = agent
-    if best_agent:
-        settings = get_settings()
-        free_km = settings.free_delivery_km
-        rate = settings.delivery_rate_per_km
-        distance_km = max(0, best_dist - free_km)
-        fee = distance_km * rate
-        da = DeliveryAssignment(
-            order_id=order_id,
-            agent_id=best_agent.id,
-            distance_km=distance_km,
-            transport_fee=fee
-        )
-        db.session.add(da)
-        db.session.commit()
-        return da
-    return None
-
-# ----------------------------- ROUTES (Customer) -----------------------------
-@app.route('/')
-def index():
-    products = Product.query.all()
-    return render_template('index.html', products=products)
-
-@app.route('/register', methods=['GET', 'POST'])
-def register():
-    if request.method == 'POST':
-        name = request.form['name']
-        email = request.form['email']
-        phone = request.form['phone']
-        password = request.form['password']
-        if User.query.filter_by(email=email).first():
-            flash('Email already registered', 'danger')
-            return redirect(url_for('register'))
-        user = User(name=name, email=email, phone=phone, role='buyer')
-        user.set_password(password)
-        db.session.add(user)
-        db.session.commit()
-        flash('Account created! Please login.', 'success')
-        return redirect(url_for('customer_login'))
-    return render_template('register.html')
-
-@app.route('/customer/login', methods=['GET', 'POST'])
-def customer_login():
-    if request.method == 'POST':
-        email = request.form['email']
-        password = request.form['password']
-        user = User.query.filter_by(email=email).first()
-        if user and user.check_password(password) and user.role == 'buyer' and user.status == 'active':
-            login_user(user)
-            return redirect(url_for('customer_dashboard'))
-        flash('Invalid credentials', 'danger')
-    return render_template('customer_login.html')
-
-@app.route('/customer/dashboard')
-@login_required
-def customer_dashboard():
-    if current_user.role != 'buyer':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    products = Product.query.all()
-    cart_items = CartItem.query.filter_by(user_id=current_user.id).all()
-    orders = Order.query.filter_by(user_id=current_user.id).order_by(Order.created_at.desc()).all()
-    return render_template('customer_dashboard.html', products=products, cart_items=cart_items, orders=orders)
-
-@app.route('/add-to-cart/<int:product_id>')
-@login_required
-def add_to_cart(product_id):
-    if current_user.role != 'buyer':
-        flash('Only customers can add to cart', 'danger')
-        return redirect(url_for('index'))
-    item = CartItem.query.filter_by(user_id=current_user.id, product_id=product_id).first()
-    if item:
-        item.quantity += 1
-    else:
-        item = CartItem(user_id=current_user.id, product_id=product_id, quantity=1)
-        db.session.add(item)
-    db.session.commit()
-    flash('Added to cart', 'success')
-    return redirect(url_for('customer_dashboard'))
-
-@app.route('/remove-from-cart/<int:item_id>')
-@login_required
-def remove_from_cart(item_id):
-    item = db.session.get(CartItem, item_id)
-    if item and item.user_id == current_user.id:
-        db.session.delete(item)
-        db.session.commit()
-        flash('Removed', 'success')
-    return redirect(url_for('customer_dashboard'))
-
-@app.route('/update-cart/<int:item_id>', methods=['POST'])
-@login_required
-def update_cart(item_id):
-    item = db.session.get(CartItem, item_id)
-    if item and item.user_id == current_user.id:
-        new_qty = int(request.form['quantity'])
-        if new_qty <= 0:
-            db.session.delete(item)
-        else:
-            item.quantity = new_qty
-        db.session.commit()
-    return redirect(url_for('customer_dashboard'))
-
-@app.route('/checkout', methods=['GET', 'POST'])
-@login_required
-def checkout():
-    if current_user.role != 'buyer':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    cart_items = CartItem.query.filter_by(user_id=current_user.id).all()
-    if not cart_items:
-        flash('Cart empty', 'danger')
-        return redirect(url_for('customer_dashboard'))
-    if request.method == 'POST':
-        address = request.form['address']
-        lat = float(request.form['lat'])
-        lng = float(request.form['lng'])
-        warehouse_lat = 0.3136
-        warehouse_lng = 32.5811
-        dist = haversine(warehouse_lat, warehouse_lng, lat, lng)
-        settings = get_settings()
-        free_km = settings.free_delivery_km
-        chargeable = max(0, dist - free_km)
-        transport_fee = chargeable * settings.delivery_rate_per_km
-        product_total = sum(item.product.price * item.quantity for item in cart_items)
-        deposit = product_total * 0.5
-        balance = product_total - deposit
-        total = product_total + transport_fee
-        order_id = 'ORD' + str(int(datetime.utcnow().timestamp()))
-        order = Order(
-            id=order_id, user_id=current_user.id, total=total,
-            deposit_paid=0, balance=balance,
-            status='pending_deposit', delivery_address=address,
-            customer_lat=lat, customer_lng=lng, transport_fee=transport_fee,
-            items=json.dumps([{'id': item.product.id, 'name': item.product.name, 'price': item.product.price, 'quantity': item.quantity} for item in cart_items])
-        )
-        db.session.add(order)
-        for item in cart_items:
-            product = item.product
-            product.stock -= item.quantity
-            db.session.delete(item)
-        db.session.commit()
-        order.deposit_paid = deposit
-        order.status = 'deposit_paid'
-        db.session.commit()
-        da = assign_agent_for_order(order_id, lat, lng)
-        if da:
-            flash(f'Order placed! Deposit of UGX {deposit:.0f} paid. Balance UGX {balance:.0f} due on delivery. Agent assigned.', 'success')
-        else:
-            flash(f'Order placed! Deposit paid. No agent available yet – will assign soon.', 'warning')
-        return redirect(url_for('customer_orders'))
-    return render_template('checkout.html', cart_items=cart_items)
-
-@app.route('/customer/orders')
-@login_required
-def customer_orders():
-    if current_user.role != 'buyer':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    orders = Order.query.filter_by(user_id=current_user.id).order_by(Order.created_at.desc()).all()
-    return render_template('customer_orders.html', orders=orders)
-
-@app.route('/order/<order_id>')
-@login_required
-def view_order(order_id):
-    order = Order.query.get_or_404(order_id)
-    if order.user_id != current_user.id and current_user.role not in ['manager','superadmin']:
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    delivery = DeliveryAssignment.query.filter_by(order_id=order_id).first()
-    agent = None
-    if delivery:
-        agent = User.query.get(delivery.agent_id)
-    return render_template('order_detail.html', order=order, delivery=delivery, agent=agent)
-
-@app.route('/order/<order_id>/chat')
-@login_required
-def order_chat(order_id):
-    order = Order.query.get_or_404(order_id)
-    if order.user_id != current_user.id:
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    delivery = DeliveryAssignment.query.filter_by(order_id=order_id).first()
-    if not delivery:
-        flash('No delivery assigned yet', 'warning')
-        return redirect(url_for('view_order', order_id=order_id))
-    return render_template('order_chat.html', order=order, delivery=delivery)
-
-@app.route('/api/chat/<int:delivery_id>', methods=['GET', 'POST'])
-@login_required
-def chat_api(delivery_id):
-    delivery = DeliveryAssignment.query.get_or_404(delivery_id)
-    order = Order.query.get(delivery.order_id)
-    if not (current_user.id == order.user_id or current_user.id == delivery.agent_id):
-        return jsonify({'error': 'Unauthorized'}), 403
-    if request.method == 'POST':
-        msg = request.json.get('message')
-        if msg:
-            chat = ChatMessage(delivery_id=delivery_id, sender_id=current_user.id, message=msg)
-            db.session.add(chat)
-            db.session.commit()
-        return jsonify({'status': 'ok'})
-    else:
-        messages = ChatMessage.query.filter_by(delivery_id=delivery_id).order_by(ChatMessage.timestamp).all()
-        return jsonify([{'sender': m.sender_id, 'message': m.message, 'timestamp': m.timestamp.isoformat()} for m in messages])
-
-@app.route('/api/agent/location/<int:agent_id>')
-@login_required
-def agent_location(agent_id):
-    if current_user.role == 'buyer':
-        has_order = DeliveryAssignment.query.join(Order).filter(
-            DeliveryAssignment.agent_id == agent_id,
-            Order.user_id == current_user.id
-        ).first()
-        if not has_order:
-            return jsonify({'error': 'Unauthorized'}), 403
-    loc = AgentLocation.query.filter_by(agent_id=agent_id).first()
-    if not loc:
-        loc = AgentLocation(agent_id=agent_id, lat=0.3136, lng=32.5811)
-        db.session.add(loc)
-        db.session.commit()
-    return jsonify({'lat': loc.lat, 'lng': loc.lng, 'updated_at': loc.updated_at.isoformat()})
-
-@app.route('/api/agent/update-location', methods=['POST'])
-@login_required
-def update_agent_location():
-    if current_user.role != 'agent':
-        return jsonify({'error': 'Only agents can update location'}), 403
-    data = request.json
-    lat = data.get('lat')
-    lng = data.get('lng')
-    if lat is None or lng is None:
-        return jsonify({'error': 'Missing coordinates'}), 400
-    loc = AgentLocation.query.filter_by(agent_id=current_user.id).first()
-    if not loc:
-        loc = AgentLocation(agent_id=current_user.id)
-        db.session.add(loc)
-    loc.lat = lat
-    loc.lng = lng
-    loc.updated_at = datetime.utcnow()
-    db.session.commit()
-    return jsonify({'status': 'ok'})
-
-@app.route('/order/<order_id>/confirm-arrival', methods=['POST'])
-@login_required
-def confirm_arrival(order_id):
-    order = Order.query.get_or_404(order_id)
-    if order.user_id != current_user.id:
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    delivery = DeliveryAssignment.query.filter_by(order_id=order_id).first()
-    if not delivery:
-        flash('No delivery assignment', 'danger')
-        return redirect(url_for('view_order', order_id=order_id))
-    if delivery.customer_confirmed_arrival:
-        flash('Already confirmed', 'info')
-        return redirect(url_for('view_order', order_id=order_id))
-    order.balance = 0
-    order.status = 'delivered'
-    delivery.customer_confirmed_arrival = True
-    delivery.remaining_payment_confirmed = True
-    delivery.status = 'delivered'
-    db.session.commit()
-    flash('Order delivered! Thank you.', 'success')
-    return redirect(url_for('customer_orders'))
-
-# ----------------------------- VENDOR ROUTES -----------------------------
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in {'png', 'jpg', 'jpeg', 'gif'}
-
-@app.route('/vendor/dashboard')
-@login_required
-def vendor_dashboard():
-    if current_user.role != 'vendor':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    products = Product.query.filter_by(vendor_id=current_user.id).all()
-    earnings = sum([p.price for p in products]) * get_settings().vendor_commission
-    return render_template('vendor_dashboard.html', products=products, earnings=earnings)
-
-@app.route('/vendor/add-product', methods=['POST'])
-@login_required
-def vendor_add_product():
-    if current_user.role != 'vendor':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    name = request.form['name']
-    price = float(request.form['price'])
-    market_price = float(request.form['market_price'])
-    category = request.form['category']
-    stock = int(request.form['stock'])
-    description = request.form['description']
-    file = request.files.get('image')
-    filename = None
-    if file and allowed_file(file.filename):
-        filename = secure_filename(file.filename)
-        name_parts = filename.rsplit('.', 1)
-        filename = f"{datetime.utcnow().timestamp()}_{name_parts[0]}.{name_parts[1]}"
-        file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
-    product = Product(
-        name=name, price=price, market_price=market_price, category=category,
-        stock=stock, image_filename=filename, description=description, vendor_id=current_user.id
-    )
-    db.session.add(product)
-    db.session.commit()
-    flash('Product added', 'success')
-    return redirect(url_for('vendor_dashboard'))
-
-@app.route('/vendor/delete-product/<int:product_id>')
-@login_required
-def vendor_delete_product(product_id):
-    if current_user.role != 'vendor':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    product = db.session.get(Product, product_id)
-    if product and product.vendor_id == current_user.id:
-        if product.image_filename:
-            try:
-                os.remove(os.path.join(app.config['UPLOAD_FOLDER'], product.image_filename))
-            except:
-                pass
-        db.session.delete(product)
-        db.session.commit()
-        flash('Product deleted', 'success')
-    return redirect(url_for('vendor_dashboard'))
-
-@app.route('/vendor/workers')
-@login_required
-def vendor_workers():
-    if current_user.role != 'vendor':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    workers = User.query.filter(User.role.in_(['technician', 'agent', 'installer'])).all()
-    return render_template('vendor_workers.html', workers=workers)
-
-# ----------------------------- TECHNICIAN ROUTES -----------------------------
-@app.route('/technician/dashboard')
-@login_required
-def technician_dashboard():
-    if current_user.role != 'technician':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    repairs = Repair.query.filter_by(assigned_technician_id=current_user.id).all()
-    earnings = sum([r.quote or 0 for r in repairs if r.status == 'completed'])
-    return render_template('technician_dashboard.html', repairs=repairs, earnings=earnings)
-
-@app.route('/technician/update-repair/<int:repair_id>', methods=['POST'])
-@login_required
-def technician_update_repair(repair_id):
-    if current_user.role != 'technician':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    repair = db.session.get(Repair, repair_id)
-    if repair and repair.assigned_technician_id == current_user.id:
-        repair.status = request.form['status']
-        db.session.commit()
-        flash('Repair updated', 'success')
-    return redirect(url_for('technician_dashboard'))
-
-# ----------------------------- AGENT ROUTES -----------------------------
-@app.route('/agent/dashboard')
-@login_required
-def agent_dashboard():
-    if current_user.role != 'agent':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    deliveries = DeliveryAssignment.query.filter_by(agent_id=current_user.id).all()
-    points = min(len([d for d in deliveries if d.status == 'delivered']), 10)
-    settings = get_settings()
-    salary = int((points / 10) * settings.agent_base_salary)
-    return render_template('agent_dashboard.html', deliveries=deliveries, points=points, salary=salary)
-
-@app.route('/agent/update-delivery/<int:delivery_id>', methods=['POST'])
-@login_required
-def agent_update_delivery(delivery_id):
-    if current_user.role != 'agent':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    delivery = db.session.get(DeliveryAssignment, delivery_id)
-    if delivery and delivery.agent_id == current_user.id:
-        new_status = request.form['status']
-        delivery.status = new_status
-        if new_status == 'delivered':
-            delivery.completed_at = datetime.utcnow()
-        db.session.commit()
-        flash('Delivery updated', 'success')
-    return redirect(url_for('agent_dashboard'))
-
-@app.route('/agent/withdraw', methods=['POST'])
-@login_required
-def agent_withdraw():
-    if current_user.role != 'agent':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    amount = float(request.form['amount'])
-    if amount > current_user.balance:
-        flash('Insufficient balance', 'danger')
-        return redirect(url_for('agent_dashboard'))
-    current_user.balance -= amount
-    db.session.commit()
-    flash('Withdrawal request submitted', 'success')
-    return redirect(url_for('agent_dashboard'))
-
-# ----------------------------- INSTALLER ROUTES -----------------------------
-@app.route('/installer/dashboard')
-@login_required
-def installer_dashboard():
-    if current_user.role != 'installer':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    return render_template('installer_dashboard.html')
-
-# ----------------------------- MANAGER ROUTES -----------------------------
-@app.route('/manager/dashboard')
-@login_required
-def manager_dashboard():
-    if current_user.role != 'manager':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    deliveries = DeliveryAssignment.query.all()
-    agents = User.query.filter_by(role='agent').all()
-    return render_template('manager_dashboard.html', deliveries=deliveries, agents=agents)
-
-@app.route('/manager/reassign-delivery/<int:delivery_id>', methods=['POST'])
-@login_required
-def reassign_delivery(delivery_id):
-    if current_user.role != 'manager':
-        return jsonify({'error': 'Unauthorized'}), 403
-    new_agent_id = request.form['agent_id']
-    delivery = DeliveryAssignment.query.get(delivery_id)
-    if not delivery:
-        flash('Delivery not found', 'danger')
-        return redirect(url_for('manager_dashboard'))
-    old_agent_id = delivery.agent_id
-    delivery.agent_id = new_agent_id
-    db.session.commit()
-    flash(f'Reassigned from agent {old_agent_id} to {new_agent_id}', 'success')
-    return redirect(url_for('manager_dashboard'))
-
-# ----------------------------- SUPERADMIN ROUTES -----------------------------
-@app.route('/superadmin/dashboard')
-@login_required
-def superadmin_dashboard():
-    if current_user.role != 'superadmin':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    users = User.query.all()
-    products = Product.query.all()
-    orders = Order.query.all()
-    settings = get_settings()
-    return render_template('superadmin_dashboard.html', users=users, products=products, orders=orders, settings=settings)
-
-@app.route('/superadmin/create-user', methods=['POST'])
-@login_required
-def superadmin_create_user():
-    if current_user.role != 'superadmin':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    name = request.form['name']
-    email = request.form['email']
-    phone = request.form['phone']
-    role = request.form['role']
-    password = request.form['password']
-    if User.query.filter_by(email=email).first():
-        flash('Email already exists', 'danger')
-        return redirect(url_for('superadmin_dashboard'))
-    user = User(name=name, email=email, phone=phone, role=role)
-    user.set_password(password)
-    db.session.add(user)
-    db.session.commit()
-    flash('User created', 'success')
-    return redirect(url_for('superadmin_dashboard'))
-
-@app.route('/superadmin/delete-user/<int:user_id>')
-@login_required
-def superadmin_delete_user(user_id):
-    if current_user.role != 'superadmin':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    user = db.session.get(User, user_id)
-    if user and user.id != current_user.id:
-        db.session.delete(user)
-        db.session.commit()
-        flash('User deleted', 'success')
-    return redirect(url_for('superadmin_dashboard'))
-
-@app.route('/superadmin/settings', methods=['POST'])
-@login_required
-def superadmin_settings():
-    if current_user.role != 'superadmin':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    settings = get_settings()
-    settings.vendor_commission = float(request.form['vendor_commission']) / 100
-    settings.agent_base_salary = float(request.form['agent_base_salary'])
-    db.session.commit()
-    flash('Settings updated', 'success')
-    return redirect(url_for('superadmin_dashboard'))
-
-@app.route('/superadmin/backup')
-@login_required
-def superadmin_backup():
-    if current_user.role != 'superadmin':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    data = {
-        'users': [{'id': u.id, 'email': u.email, 'name': u.name, 'role': u.role} for u in User.query.all()],
-        'products': [{'id': p.id, 'name': p.name, 'price': p.price} for p in Product.query.all()],
-        'orders': [{'id': o.id, 'total': o.total, 'status': o.status} for o in Order.query.all()]
-    }
-    json_str = json.dumps(data, indent=2)
-    return send_file(io.BytesIO(json_str.encode()), as_attachment=True, download_name='cybervault_backup.json', mimetype='application/json')
-
-@app.route('/superadmin/restore', methods=['POST'])
-@login_required
-def superadmin_restore():
-    if current_user.role != 'superadmin':
-        flash('Access denied', 'danger')
-        return redirect(url_for('index'))
-    file = request.files.get('backup_file')
-    if not file:
-        flash('No file uploaded', 'danger')
-        return redirect(url_for('superadmin_dashboard'))
-    flash('Restore feature requires manual merge for security', 'warning')
-    return redirect(url_for('superadmin_dashboard'))
-
-# ----------------------------- MANAGEMENT LOGIN -----------------------------
-@app.route('/management/login', methods=['GET', 'POST'])
-def management_login():
-    if request.method == 'POST':
-        email = request.form['email']
-        password = request.form['password']
-        user = User.query.filter_by(email=email).first()
-        if user and user.check_password(password) and user.role != 'buyer' and user.status == 'active':
-            login_user(user)
-            if user.role == 'vendor':
-                return redirect(url_for('vendor_dashboard'))
-            elif user.role == 'technician':
-                return redirect(url_for('technician_dashboard'))
-            elif user.role == 'agent':
-                return redirect(url_for('agent_dashboard'))
-            elif user.role == 'installer':
-                return redirect(url_for('installer_dashboard'))
-            elif user.role == 'manager':
-                return redirect(url_for('manager_dashboard'))
-            elif user.role == 'superadmin':
-                return redirect(url_for('superadmin_dashboard'))
-        flash('Invalid credentials', 'danger')
-    return render_template('management_login.html')
-
-@app.route('/logout')
-@login_required
-def logout():
-    logout_user()
-    return redirect(url_for('index'))
-
-# ----------------------------- STATIC FILE SERVING -----------------------------
-# This is the only route for static uploads – duplicate removed
-@app.route('/static/uploads/<filename>')
-def uploaded_file(filename):
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
-
-# ----------------------------- TEMPLATE WRITER -----------------------------
+# ----------------------------- Force template creation -----------------------------
 def ensure_templates():
     os.makedirs('templates', exist_ok=True)
     templates = {
@@ -1281,24 +540,764 @@ function filterProducts() {
     <thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Actions</th></tr></thead>
     <tbody>
     {% for u in users %}
-    <tr>
-        <td>{{ u.id }}</td><td>{{ u.name }}</td><td>{{ u.email }}</td><td>{{ u.role }}</td>
-        <td><a href="{{ url_for('superadmin_delete_user', user_id=u.id) }}" class="btn btn-sm btn-danger" onclick="return confirm('Delete user?')">Delete</a></td>
-    </tr>
+    <tr><td>{{ u.id }}</td><td>{{ u.name }}</td><td>{{ u.email }}</td><td>{{ u.role }}</td>
+    <td><a href="{{ url_for('superadmin_delete_user', user_id=u.id) }}" class="btn btn-sm btn-danger" onclick="return confirm('Delete user?')">Delete</a></td></tr>
     {% endfor %}
     </tbody>
 </table>
 {% endblock %}'''
     }
-    for filename, content in templates.items():
-        path = os.path.join('templates', filename)
+    for name, content in templates.items():
+        path = os.path.join('templates', name)
         if not os.path.exists(path):
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(content)
 
+# Ensure templates are written before app starts
 ensure_templates()
 
-# ----------------------------- RUN THE APP -----------------------------
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'your-secret-key-change-in-production'
+app.config['UPLOAD_FOLDER'] = 'static/uploads'
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
+if os.environ.get('RENDER'):
+    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:////tmp/cybervault.db'
+else:
+    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///cybervault.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db = SQLAlchemy(app)
+login_manager = LoginManager(app)
+login_manager.login_view = 'customer_login'
+
+# ----------------------------- MODELS -----------------------------
+class User(UserMixin, db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(100), unique=True, nullable=False)
+    password_hash = db.Column(db.String(200), nullable=False)
+    name = db.Column(db.String(100), nullable=False)
+    phone = db.Column(db.String(20))
+    role = db.Column(db.String(20), default='buyer')
+    balance = db.Column(db.Float, default=0.0)
+    business_name = db.Column(db.String(100))
+    specialty = db.Column(db.String(50))
+    status = db.Column(db.String(20), default='active')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
+
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
+
+class PlatformSettings(db.Model):
+    id = db.Column(db.Integer, primary_key=True, default=1)
+    vendor_commission = db.Column(db.Float, default=0.10)
+    agent_base_salary = db.Column(db.Float, default=300000)
+    delivery_rate_per_km = db.Column(db.Float, default=1000)
+    free_delivery_km = db.Column(db.Integer, default=5)
+
+class Product(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    price = db.Column(db.Float, nullable=False)
+    market_price = db.Column(db.Float, nullable=False)
+    category = db.Column(db.String(50))
+    stock = db.Column(db.Integer, default=0)
+    image_filename = db.Column(db.String(200))
+    description = db.Column(db.Text)
+    vendor_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    ratings = db.Column(db.String(200), default='[]')
+    sold_today = db.Column(db.Integer, default=0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class CartItem(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    product_id = db.Column(db.Integer, db.ForeignKey('product.id'))
+    quantity = db.Column(db.Integer, default=1)
+    product = db.relationship('Product', backref='cart_items')
+
+class Wishlist(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    product_id = db.Column(db.Integer, db.ForeignKey('product.id'))
+
+class Order(db.Model):
+    id = db.Column(db.String(20), primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    total = db.Column(db.Float, nullable=False)
+    deposit_paid = db.Column(db.Float, default=0.0)
+    balance = db.Column(db.Float, default=0.0)
+    status = db.Column(db.String(20), default='pending')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    items = db.Column(db.Text)
+    delivery_address = db.Column(db.String(200))
+    customer_lat = db.Column(db.Float)
+    customer_lng = db.Column(db.Float)
+    transport_fee = db.Column(db.Float, default=0.0)
+
+class Repair(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    device = db.Column(db.String(100))
+    issue = db.Column(db.Text)
+    assigned_technician_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    status = db.Column(db.String(20), default='pending')
+    quote = db.Column(db.Float)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class DeliveryAssignment(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    order_id = db.Column(db.String(20), db.ForeignKey('order.id'))
+    agent_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    status = db.Column(db.String(20), default='assigned')
+    distance_km = db.Column(db.Float, default=0.0)
+    transport_fee = db.Column(db.Float, default=0.0)
+    assigned_at = db.Column(db.DateTime, default=datetime.utcnow)
+    customer_confirmed_arrival = db.Column(db.Boolean, default=False)
+    remaining_payment_confirmed = db.Column(db.Boolean, default=False)
+
+class AgentLocation(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    agent_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    lat = db.Column(db.Float, default=0.3136)
+    lng = db.Column(db.Float, default=32.5811)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class ChatMessage(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    delivery_id = db.Column(db.Integer, db.ForeignKey('delivery_assignment.id'))
+    sender_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    message = db.Column(db.Text)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+
+class Review(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    product_id = db.Column(db.Integer, db.ForeignKey('product.id'))
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    rating = db.Column(db.Integer)
+    comment = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class Dispute(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    order_id = db.Column(db.String(20))
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    reason = db.Column(db.Text)
+    status = db.Column(db.String(20), default='open')
+    resolution = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class AuditLog(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    action = db.Column(db.String(200))
+    details = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+@login_manager.user_loader
+def load_user(user_id):
+    return db.session.get(User, int(user_id))
+
+# ----------------------------- HELPER FUNCTIONS -----------------------------
+def get_settings():
+    s = PlatformSettings.query.first()
+    if not s:
+        s = PlatformSettings()
+        db.session.add(s)
+        db.session.commit()
+    return s
+
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
+    c = 2 * math.asin(math.sqrt(a))
+    return R * c
+
+def assign_agent_for_order(order_id, customer_lat, customer_lng):
+    agents = User.query.filter_by(role='agent', status='active').all()
+    if not agents:
+        return None
+    best_agent = None
+    best_dist = float('inf')
+    for agent in agents:
+        loc = AgentLocation.query.filter_by(agent_id=agent.id).first()
+        if not loc:
+            loc = AgentLocation(agent_id=agent.id, lat=0.3136, lng=32.5811)
+            db.session.add(loc)
+            db.session.commit()
+        dist = haversine(loc.lat, loc.lng, customer_lat, customer_lng)
+        if dist < best_dist:
+            best_dist = dist
+            best_agent = agent
+    if best_agent:
+        settings = get_settings()
+        free_km = settings.free_delivery_km
+        rate = settings.delivery_rate_per_km
+        distance_km = max(0, best_dist - free_km)
+        fee = distance_km * rate
+        da = DeliveryAssignment(
+            order_id=order_id,
+            agent_id=best_agent.id,
+            distance_km=distance_km,
+            transport_fee=fee
+        )
+        db.session.add(da)
+        db.session.commit()
+        return da
+    return None
+
+# ----------------------------- CUSTOMER ROUTES -----------------------------
+@app.route('/')
+def index():
+    products = Product.query.all()
+    return render_template('index.html', products=products)
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        name = request.form['name']
+        email = request.form['email']
+        phone = request.form['phone']
+        password = request.form['password']
+        if User.query.filter_by(email=email).first():
+            flash('Email already registered', 'danger')
+            return redirect(url_for('register'))
+        user = User(name=name, email=email, phone=phone, role='buyer')
+        user.set_password(password)
+        db.session.add(user)
+        db.session.commit()
+        flash('Account created! Please login.', 'success')
+        return redirect(url_for('customer_login'))
+    return render_template('register.html')
+
+@app.route('/customer/login', methods=['GET', 'POST'])
+def customer_login():
+    if request.method == 'POST':
+        email = request.form['email']
+        password = request.form['password']
+        user = User.query.filter_by(email=email).first()
+        if user and user.check_password(password) and user.role == 'buyer' and user.status == 'active':
+            login_user(user)
+            return redirect(url_for('customer_dashboard'))
+        flash('Invalid credentials', 'danger')
+    return render_template('customer_login.html')
+
+@app.route('/customer/dashboard')
+@login_required
+def customer_dashboard():
+    if current_user.role != 'buyer':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    products = Product.query.all()
+    cart_items = CartItem.query.filter_by(user_id=current_user.id).all()
+    recent_ids = session.get('recently_viewed', [])
+    recent_products = [Product.query.get(pid) for pid in recent_ids[-4:] if Product.query.get(pid)]
+    return render_template('customer_dashboard.html', products=products, cart_items=cart_items, recent_products=recent_products)
+
+@app.route('/add-to-cart/<int:product_id>')
+@login_required
+def add_to_cart(product_id):
+    if current_user.role != 'buyer':
+        flash('Only customers can add to cart', 'danger')
+        return redirect(url_for('index'))
+    item = CartItem.query.filter_by(user_id=current_user.id, product_id=product_id).first()
+    if item:
+        item.quantity += 1
+    else:
+        item = CartItem(user_id=current_user.id, product_id=product_id, quantity=1)
+        db.session.add(item)
+    db.session.commit()
+    flash('Added to cart', 'success')
+    return redirect(url_for('customer_dashboard'))
+
+@app.route('/remove-from-cart/<int:item_id>')
+@login_required
+def remove_from_cart(item_id):
+    item = db.session.get(CartItem, item_id)
+    if item and item.user_id == current_user.id:
+        db.session.delete(item)
+        db.session.commit()
+        flash('Removed', 'success')
+    return redirect(url_for('customer_dashboard'))
+
+@app.route('/update-cart/<int:item_id>', methods=['POST'])
+@login_required
+def update_cart(item_id):
+    item = db.session.get(CartItem, item_id)
+    if item and item.user_id == current_user.id:
+        new_qty = int(request.form['quantity'])
+        if new_qty <= 0:
+            db.session.delete(item)
+        else:
+            item.quantity = new_qty
+        db.session.commit()
+    return redirect(url_for('customer_dashboard'))
+
+@app.route('/checkout', methods=['GET', 'POST'])
+@login_required
+def checkout():
+    if current_user.role != 'buyer':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    cart_items = CartItem.query.filter_by(user_id=current_user.id).all()
+    if not cart_items:
+        flash('Cart empty', 'danger')
+        return redirect(url_for('customer_dashboard'))
+    if request.method == 'POST':
+        address = request.form['address']
+        lat = float(request.form['lat'])
+        lng = float(request.form['lng'])
+        warehouse_lat = 0.3136
+        warehouse_lng = 32.5811
+        dist = haversine(warehouse_lat, warehouse_lng, lat, lng)
+        settings = get_settings()
+        free_km = settings.free_delivery_km
+        chargeable = max(0, dist - free_km)
+        transport_fee = chargeable * settings.delivery_rate_per_km
+        product_total = sum(item.product.price * item.quantity for item in cart_items)
+        deposit = product_total * 0.5
+        balance = product_total - deposit
+        total = product_total + transport_fee
+        order_id = 'ORD' + str(int(datetime.utcnow().timestamp()))
+        order = Order(
+            id=order_id, user_id=current_user.id, total=total,
+            deposit_paid=0, balance=balance,
+            status='pending_deposit', delivery_address=address,
+            customer_lat=lat, customer_lng=lng, transport_fee=transport_fee,
+            items=json.dumps([{'id': item.product.id, 'name': item.product.name, 'price': item.product.price, 'quantity': item.quantity} for item in cart_items])
+        )
+        db.session.add(order)
+        for item in cart_items:
+            product = item.product
+            product.stock -= item.quantity
+            db.session.delete(item)
+        db.session.commit()
+        order.deposit_paid = deposit
+        order.status = 'deposit_paid'
+        db.session.commit()
+        da = assign_agent_for_order(order_id, lat, lng)
+        if da:
+            flash(f'Order placed! Deposit of UGX {deposit:.0f} paid. Balance UGX {balance:.0f} due on delivery. Agent assigned.', 'success')
+        else:
+            flash(f'Order placed! Deposit paid. No agent available yet – will assign soon.', 'warning')
+        return redirect(url_for('customer_orders'))
+    return render_template('checkout.html', cart_items=cart_items)
+
+@app.route('/customer/orders')
+@login_required
+def customer_orders():
+    if current_user.role != 'buyer':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    orders = Order.query.filter_by(user_id=current_user.id).order_by(Order.created_at.desc()).all()
+    return render_template('customer_orders.html', orders=orders)
+
+@app.route('/order/<order_id>')
+@login_required
+def view_order(order_id):
+    order = Order.query.get_or_404(order_id)
+    if order.user_id != current_user.id and current_user.role not in ['manager','superadmin']:
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    delivery = DeliveryAssignment.query.filter_by(order_id=order_id).first()
+    agent = None
+    if delivery:
+        agent = User.query.get(delivery.agent_id)
+    return render_template('order_detail.html', order=order, delivery=delivery, agent=agent)
+
+@app.route('/order/<order_id>/chat')
+@login_required
+def order_chat(order_id):
+    order = Order.query.get_or_404(order_id)
+    if order.user_id != current_user.id:
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    delivery = DeliveryAssignment.query.filter_by(order_id=order_id).first()
+    if not delivery:
+        flash('No delivery assigned yet', 'warning')
+        return redirect(url_for('view_order', order_id=order_id))
+    return render_template('order_chat.html', order=order, delivery=delivery)
+
+@app.route('/api/chat/<int:delivery_id>', methods=['GET', 'POST'])
+@login_required
+def chat_api(delivery_id):
+    delivery = DeliveryAssignment.query.get_or_404(delivery_id)
+    order = Order.query.get(delivery.order_id)
+    if not (current_user.id == order.user_id or current_user.id == delivery.agent_id):
+        return jsonify({'error': 'Unauthorized'}), 403
+    if request.method == 'POST':
+        msg = request.json.get('message')
+        if msg:
+            chat = ChatMessage(delivery_id=delivery_id, sender_id=current_user.id, message=msg)
+            db.session.add(chat)
+            db.session.commit()
+        return jsonify({'status': 'ok'})
+    else:
+        messages = ChatMessage.query.filter_by(delivery_id=delivery_id).order_by(ChatMessage.timestamp).all()
+        return jsonify([{'sender': m.sender_id, 'message': m.message, 'timestamp': m.timestamp.isoformat()} for m in messages])
+
+@app.route('/api/agent/location/<int:agent_id>')
+@login_required
+def agent_location(agent_id):
+    if current_user.role == 'buyer':
+        has_order = DeliveryAssignment.query.join(Order).filter(
+            DeliveryAssignment.agent_id == agent_id,
+            Order.user_id == current_user.id
+        ).first()
+        if not has_order:
+            return jsonify({'error': 'Unauthorized'}), 403
+    loc = AgentLocation.query.filter_by(agent_id=agent_id).first()
+    if not loc:
+        loc = AgentLocation(agent_id=agent_id, lat=0.3136, lng=32.5811)
+        db.session.add(loc)
+        db.session.commit()
+    return jsonify({'lat': loc.lat, 'lng': loc.lng, 'updated_at': loc.updated_at.isoformat()})
+
+@app.route('/api/agent/update-location', methods=['POST'])
+@login_required
+def update_agent_location():
+    if current_user.role != 'agent':
+        return jsonify({'error': 'Only agents can update location'}), 403
+    data = request.json
+    lat = data.get('lat')
+    lng = data.get('lng')
+    if lat is None or lng is None:
+        return jsonify({'error': 'Missing coordinates'}), 400
+    loc = AgentLocation.query.filter_by(agent_id=current_user.id).first()
+    if not loc:
+        loc = AgentLocation(agent_id=current_user.id)
+        db.session.add(loc)
+    loc.lat = lat
+    loc.lng = lng
+    loc.updated_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify({'status': 'ok'})
+
+@app.route('/order/<order_id>/confirm-arrival', methods=['POST'])
+@login_required
+def confirm_arrival(order_id):
+    order = Order.query.get_or_404(order_id)
+    if order.user_id != current_user.id:
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    delivery = DeliveryAssignment.query.filter_by(order_id=order_id).first()
+    if not delivery:
+        flash('No delivery assignment', 'danger')
+        return redirect(url_for('view_order', order_id=order_id))
+    if delivery.customer_confirmed_arrival:
+        flash('Already confirmed', 'info')
+        return redirect(url_for('view_order', order_id=order_id))
+    order.balance = 0
+    order.status = 'delivered'
+    delivery.customer_confirmed_arrival = True
+    delivery.remaining_payment_confirmed = True
+    delivery.status = 'delivered'
+    db.session.commit()
+    flash('Order delivered! Thank you.', 'success')
+    return redirect(url_for('customer_orders'))
+
+# ----------------------------- VENDOR ROUTES -----------------------------
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in {'png', 'jpg', 'jpeg', 'gif'}
+
+@app.route('/vendor/dashboard')
+@login_required
+def vendor_dashboard():
+    if current_user.role != 'vendor':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    products = Product.query.filter_by(vendor_id=current_user.id).all()
+    earnings = sum([p.price for p in products]) * get_settings().vendor_commission
+    return render_template('vendor_dashboard.html', products=products, earnings=earnings)
+
+@app.route('/vendor/add-product', methods=['POST'])
+@login_required
+def vendor_add_product():
+    if current_user.role != 'vendor':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    name = request.form['name']
+    price = float(request.form['price'])
+    market_price = float(request.form['market_price'])
+    category = request.form['category']
+    stock = int(request.form['stock'])
+    description = request.form['description']
+    file = request.files.get('image')
+    filename = None
+    if file and allowed_file(file.filename):
+        filename = secure_filename(file.filename)
+        name_parts = filename.rsplit('.', 1)
+        filename = f"{datetime.utcnow().timestamp()}_{name_parts[0]}.{name_parts[1]}"
+        file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+    product = Product(
+        name=name, price=price, market_price=market_price, category=category,
+        stock=stock, image_filename=filename, description=description, vendor_id=current_user.id
+    )
+    db.session.add(product)
+    db.session.commit()
+    flash('Product added', 'success')
+    return redirect(url_for('vendor_dashboard'))
+
+@app.route('/vendor/delete-product/<int:product_id>')
+@login_required
+def vendor_delete_product(product_id):
+    if current_user.role != 'vendor':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    product = db.session.get(Product, product_id)
+    if product and product.vendor_id == current_user.id:
+        if product.image_filename:
+            try:
+                os.remove(os.path.join(app.config['UPLOAD_FOLDER'], product.image_filename))
+            except:
+                pass
+        db.session.delete(product)
+        db.session.commit()
+        flash('Product deleted', 'success')
+    return redirect(url_for('vendor_dashboard'))
+
+@app.route('/vendor/workers')
+@login_required
+def vendor_workers():
+    if current_user.role != 'vendor':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    workers = User.query.filter(User.role.in_(['technician', 'agent', 'installer'])).all()
+    return render_template('vendor_workers.html', workers=workers)
+
+# ----------------------------- TECHNICIAN ROUTES -----------------------------
+@app.route('/technician/dashboard')
+@login_required
+def technician_dashboard():
+    if current_user.role != 'technician':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    repairs = Repair.query.filter_by(assigned_technician_id=current_user.id).all()
+    earnings = sum([r.quote or 0 for r in repairs if r.status == 'completed'])
+    return render_template('technician_dashboard.html', repairs=repairs, earnings=earnings)
+
+@app.route('/technician/update-repair/<int:repair_id>', methods=['POST'])
+@login_required
+def technician_update_repair(repair_id):
+    if current_user.role != 'technician':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    repair = db.session.get(Repair, repair_id)
+    if repair and repair.assigned_technician_id == current_user.id:
+        repair.status = request.form['status']
+        db.session.commit()
+        flash('Repair updated', 'success')
+    return redirect(url_for('technician_dashboard'))
+
+# ----------------------------- AGENT ROUTES -----------------------------
+@app.route('/agent/dashboard')
+@login_required
+def agent_dashboard():
+    if current_user.role != 'agent':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    deliveries = DeliveryAssignment.query.filter_by(agent_id=current_user.id).all()
+    points = min(len([d for d in deliveries if d.status == 'delivered']), 10)
+    settings = get_settings()
+    salary = int((points / 10) * settings.agent_base_salary)
+    return render_template('agent_dashboard.html', deliveries=deliveries, points=points, salary=salary)
+
+@app.route('/agent/update-delivery/<int:delivery_id>', methods=['POST'])
+@login_required
+def agent_update_delivery(delivery_id):
+    if current_user.role != 'agent':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    delivery = db.session.get(DeliveryAssignment, delivery_id)
+    if delivery and delivery.agent_id == current_user.id:
+        new_status = request.form['status']
+        delivery.status = new_status
+        if new_status == 'delivered':
+            delivery.completed_at = datetime.utcnow()
+        db.session.commit()
+        flash('Delivery updated', 'success')
+    return redirect(url_for('agent_dashboard'))
+
+@app.route('/agent/withdraw', methods=['POST'])
+@login_required
+def agent_withdraw():
+    if current_user.role != 'agent':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    amount = float(request.form['amount'])
+    if amount > current_user.balance:
+        flash('Insufficient balance', 'danger')
+        return redirect(url_for('agent_dashboard'))
+    current_user.balance -= amount
+    db.session.commit()
+    flash('Withdrawal request submitted', 'success')
+    return redirect(url_for('agent_dashboard'))
+
+# ----------------------------- INSTALLER ROUTES -----------------------------
+@app.route('/installer/dashboard')
+@login_required
+def installer_dashboard():
+    if current_user.role != 'installer':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    return render_template('installer_dashboard.html')
+
+# ----------------------------- MANAGER ROUTES -----------------------------
+@app.route('/manager/dashboard')
+@login_required
+def manager_dashboard():
+    if current_user.role != 'manager':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    deliveries = DeliveryAssignment.query.all()
+    agents = User.query.filter_by(role='agent').all()
+    return render_template('manager_dashboard.html', deliveries=deliveries, agents=agents)
+
+@app.route('/manager/reassign-delivery/<int:delivery_id>', methods=['POST'])
+@login_required
+def reassign_delivery(delivery_id):
+    if current_user.role != 'manager':
+        return jsonify({'error': 'Unauthorized'}), 403
+    new_agent_id = request.form['agent_id']
+    delivery = DeliveryAssignment.query.get(delivery_id)
+    if not delivery:
+        flash('Delivery not found', 'danger')
+        return redirect(url_for('manager_dashboard'))
+    old_agent_id = delivery.agent_id
+    delivery.agent_id = new_agent_id
+    db.session.commit()
+    flash(f'Reassigned from agent {old_agent_id} to {new_agent_id}', 'success')
+    return redirect(url_for('manager_dashboard'))
+
+# ----------------------------- SUPERADMIN ROUTES -----------------------------
+@app.route('/superadmin/dashboard')
+@login_required
+def superadmin_dashboard():
+    if current_user.role != 'superadmin':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    users = User.query.all()
+    products = Product.query.all()
+    orders = Order.query.all()
+    settings = get_settings()
+    return render_template('superadmin_dashboard.html', users=users, products=products, orders=orders, settings=settings)
+
+@app.route('/superadmin/create-user', methods=['POST'])
+@login_required
+def superadmin_create_user():
+    if current_user.role != 'superadmin':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    name = request.form['name']
+    email = request.form['email']
+    phone = request.form['phone']
+    role = request.form['role']
+    password = request.form['password']
+    if User.query.filter_by(email=email).first():
+        flash('Email already exists', 'danger')
+        return redirect(url_for('superadmin_dashboard'))
+    user = User(name=name, email=email, phone=phone, role=role)
+    user.set_password(password)
+    db.session.add(user)
+    db.session.commit()
+    flash('User created', 'success')
+    return redirect(url_for('superadmin_dashboard'))
+
+@app.route('/superadmin/delete-user/<int:user_id>')
+@login_required
+def superadmin_delete_user(user_id):
+    if current_user.role != 'superadmin':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    user = db.session.get(User, user_id)
+    if user and user.id != current_user.id:
+        db.session.delete(user)
+        db.session.commit()
+        flash('User deleted', 'success')
+    return redirect(url_for('superadmin_dashboard'))
+
+@app.route('/superadmin/settings', methods=['POST'])
+@login_required
+def superadmin_settings():
+    if current_user.role != 'superadmin':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    settings = get_settings()
+    settings.vendor_commission = float(request.form['vendor_commission']) / 100
+    settings.agent_base_salary = float(request.form['agent_base_salary'])
+    db.session.commit()
+    flash('Settings updated', 'success')
+    return redirect(url_for('superadmin_dashboard'))
+
+@app.route('/superadmin/backup')
+@login_required
+def superadmin_backup():
+    if current_user.role != 'superadmin':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    data = {
+        'users': [{'id': u.id, 'email': u.email, 'name': u.name, 'role': u.role} for u in User.query.all()],
+        'products': [{'id': p.id, 'name': p.name, 'price': p.price} for p in Product.query.all()],
+        'orders': [{'id': o.id, 'total': o.total, 'status': o.status} for o in Order.query.all()]
+    }
+    json_str = json.dumps(data, indent=2)
+    return send_file(io.BytesIO(json_str.encode()), as_attachment=True, download_name='cybervault_backup.json', mimetype='application/json')
+
+@app.route('/superadmin/restore', methods=['POST'])
+@login_required
+def superadmin_restore():
+    if current_user.role != 'superadmin':
+        flash('Access denied', 'danger')
+        return redirect(url_for('index'))
+    file = request.files.get('backup_file')
+    if not file:
+        flash('No file uploaded', 'danger')
+        return redirect(url_for('superadmin_dashboard'))
+    flash('Restore feature requires manual merge for security', 'warning')
+    return redirect(url_for('superadmin_dashboard'))
+
+# ----------------------------- MANAGEMENT LOGIN -----------------------------
+@app.route('/management/login', methods=['GET', 'POST'])
+def management_login():
+    if request.method == 'POST':
+        email = request.form['email']
+        password = request.form['password']
+        user = User.query.filter_by(email=email).first()
+        if user and user.check_password(password) and user.role != 'buyer' and user.status == 'active':
+            login_user(user)
+            if user.role == 'vendor':
+                return redirect(url_for('vendor_dashboard'))
+            elif user.role == 'technician':
+                return redirect(url_for('technician_dashboard'))
+            elif user.role == 'agent':
+                return redirect(url_for('agent_dashboard'))
+            elif user.role == 'installer':
+                return redirect(url_for('installer_dashboard'))
+            elif user.role == 'manager':
+                return redirect(url_for('manager_dashboard'))
+            elif user.role == 'superadmin':
+                return redirect(url_for('superadmin_dashboard'))
+        flash('Invalid credentials', 'danger')
+    return render_template('management_login.html')
+
+@app.route('/logout')
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for('index'))
+
+# ----------------------------- STATIC FILE SERVING -----------------------------
+@app.route('/static/uploads/<filename>')
+def uploaded_file(filename):
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+
+# ----------------------------- RUN -----------------------------
 if __name__ == '__main__':
     import os
     with app.app_context():
