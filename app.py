@@ -2,10 +2,9 @@ import os
 import json
 import io
 import math
-import random
 from datetime import datetime
 from werkzeug.utils import secure_filename
-from flask import Flask, render_template, redirect, url_for, flash, request, session, send_file, jsonify
+from flask import Flask, render_template, redirect, url_for, flash, request, session, send_file, jsonify, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -26,7 +25,7 @@ db = SQLAlchemy(app)
 login_manager = LoginManager(app)
 login_manager.login_view = 'customer_login'
 
-# ----------------------------- MODELS (all features) -----------------------------
+# ----------------------------- MODELS -----------------------------
 class User(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
     email = db.Column(db.String(100), unique=True, nullable=False)
@@ -39,8 +38,10 @@ class User(UserMixin, db.Model):
     specialty = db.Column(db.String(50))
     status = db.Column(db.String(20), default='active')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
+
     def check_password(self, password):
         return check_password_hash(self.password_hash, password)
 
@@ -58,7 +59,7 @@ class Product(db.Model):
     market_price = db.Column(db.Float, nullable=False)
     category = db.Column(db.String(50))
     stock = db.Column(db.Integer, default=0)
-    image_filename = db.Column(db.String(200))  # stores uploaded file name
+    image_filename = db.Column(db.String(200))
     description = db.Column(db.Text)
     vendor_id = db.Column(db.Integer, db.ForeignKey('user.id'))
     ratings = db.Column(db.String(200), default='[]')
@@ -204,7 +205,7 @@ def assign_agent_for_order(order_id, customer_lat, customer_lng):
         return da
     return None
 
-# ----------------------------- CUSTOMER ROUTES -----------------------------
+# ----------------------------- ROUTES (Customer) -----------------------------
 @app.route('/')
 def index():
     products = Product.query.all()
@@ -453,7 +454,7 @@ def confirm_arrival(order_id):
     flash('Order delivered! Thank you.', 'success')
     return redirect(url_for('customer_orders'))
 
-# ----------------------------- VENDOR DASHBOARD (with file upload) -----------------------------
+# ----------------------------- VENDOR ROUTES -----------------------------
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in {'png', 'jpg', 'jpeg', 'gif'}
 
@@ -479,12 +480,10 @@ def vendor_add_product():
     category = request.form['category']
     stock = int(request.form['stock'])
     description = request.form['description']
-    # handle file upload
     file = request.files.get('image')
     filename = None
     if file and allowed_file(file.filename):
         filename = secure_filename(file.filename)
-        # add timestamp to avoid collisions
         name_parts = filename.rsplit('.', 1)
         filename = f"{datetime.utcnow().timestamp()}_{name_parts[0]}.{name_parts[1]}"
         file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
@@ -505,7 +504,6 @@ def vendor_delete_product(product_id):
         return redirect(url_for('index'))
     product = db.session.get(Product, product_id)
     if product and product.vendor_id == current_user.id:
-        # delete image file if exists
         if product.image_filename:
             try:
                 os.remove(os.path.join(app.config['UPLOAD_FOLDER'], product.image_filename))
@@ -525,7 +523,7 @@ def vendor_workers():
     workers = User.query.filter(User.role.in_(['technician', 'agent', 'installer'])).all()
     return render_template('vendor_workers.html', workers=workers)
 
-# ----------------------------- TECHNICIAN DASHBOARD -----------------------------
+# ----------------------------- TECHNICIAN ROUTES -----------------------------
 @app.route('/technician/dashboard')
 @login_required
 def technician_dashboard():
@@ -549,7 +547,7 @@ def technician_update_repair(repair_id):
         flash('Repair updated', 'success')
     return redirect(url_for('technician_dashboard'))
 
-# ----------------------------- AGENT DASHBOARD -----------------------------
+# ----------------------------- AGENT ROUTES -----------------------------
 @app.route('/agent/dashboard')
 @login_required
 def agent_dashboard():
@@ -593,17 +591,16 @@ def agent_withdraw():
     flash('Withdrawal request submitted', 'success')
     return redirect(url_for('agent_dashboard'))
 
-# ----------------------------- INSTALLER DASHBOARD -----------------------------
+# ----------------------------- INSTALLER ROUTES -----------------------------
 @app.route('/installer/dashboard')
 @login_required
 def installer_dashboard():
     if current_user.role != 'installer':
         flash('Access denied', 'danger')
         return redirect(url_for('index'))
-    # installations = Installation.query.filter_by(installer_id=current_user.id).all()
     return render_template('installer_dashboard.html')
 
-# ----------------------------- MANAGER DASHBOARD -----------------------------
+# ----------------------------- MANAGER ROUTES -----------------------------
 @app.route('/manager/dashboard')
 @login_required
 def manager_dashboard():
@@ -630,7 +627,7 @@ def reassign_delivery(delivery_id):
     flash(f'Reassigned from agent {old_agent_id} to {new_agent_id}', 'success')
     return redirect(url_for('manager_dashboard'))
 
-# ----------------------------- SUPERADMIN DASHBOARD -----------------------------
+# ----------------------------- SUPERADMIN ROUTES -----------------------------
 @app.route('/superadmin/dashboard')
 @login_required
 def superadmin_dashboard():
@@ -714,7 +711,6 @@ def superadmin_restore():
     if not file:
         flash('No file uploaded', 'danger')
         return redirect(url_for('superadmin_dashboard'))
-    # For security, we do not automatically restore; show message
     flash('Restore feature requires manual merge for security', 'warning')
     return redirect(url_for('superadmin_dashboard'))
 
@@ -749,6 +745,7 @@ def logout():
     return redirect(url_for('index'))
 
 # ----------------------------- STATIC FILE SERVING -----------------------------
+# This is the only route for static uploads – duplicate removed
 @app.route('/static/uploads/<filename>')
 def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
@@ -1281,7 +1278,7 @@ function filterProducts() {
 </form>
 <h3 class="mt-4">User List</h3>
 <table class="table table-dark">
-    <thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Actions</th></table></thead>
+    <thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Actions</th></tr></thead>
     <tbody>
     {% for u in users %}
     <tr>
@@ -1301,14 +1298,9 @@ function filterProducts() {
 
 ensure_templates()
 
-# ----------------------------- STATIC FILES -----------------------------
-from flask import send_from_directory
-@app.route('/static/uploads/<filename>')
-def uploaded_file(filename):
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
-
-# ----------------------------- RUN -----------------------------
+# ----------------------------- RUN THE APP -----------------------------
 if __name__ == '__main__':
+    import os
     with app.app_context():
         db.create_all()
         if not User.query.filter_by(role='superadmin').first():
@@ -1322,4 +1314,4 @@ if __name__ == '__main__':
             db.session.add(demo)
             db.session.commit()
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=port)
